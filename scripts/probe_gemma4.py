@@ -14,9 +14,10 @@ What it answers:
   - Early-exit hidden state: is the residual width uniform across layers?
 
 Usage:
-  uv run python scripts/probe_gemma4.py
-  # or pick device/dtype/model:
-  DEVICE=cuda DTYPE=bfloat16 MODEL_DIR=google/gemma-4-E2B-it uv run python scripts/probe_gemma4.py
+  uv run python scripts/probe_gemma4.py                      # CPU fp32 (0 VRAM, ~22GB RAM)
+  DEVICE=cuda DTYPE=bfloat16 uv run python scripts/probe_gemma4.py   # ~12GB VRAM
+  DEVICE=meta uv run python scripts/probe_gemma4.py          # ~0 memory: structural checks
+                                                             # only (skips the forward pass)
 """
 
 import logging
@@ -33,6 +34,7 @@ logger = logging.getLogger()
 
 MODEL_DIR = os.environ.get("MODEL_DIR", "google/gemma-4-E2B-it")
 DEVICE = os.environ.get("DEVICE", "cpu")
+META = DEVICE == "meta"  # build architecture only (no real weights) -> ~0 memory
 DTYPE = {"float32": torch.float32, "float16": torch.float16, "bfloat16": torch.bfloat16}[
     os.environ.get("DTYPE", "float32")
 ]
@@ -88,25 +90,38 @@ except Exception as e:
 # ---------------------------------------------------------------------------
 section("Step 1: Load full (multimodal) model")
 # ---------------------------------------------------------------------------
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
-load_kwargs = dict(
-    torch_dtype=DTYPE, low_cpu_mem_usage=True, trust_remote_code=True,
-    output_hidden_states=True, output_attentions=False,
-)
 full_model = None
 try:
-    if has_gemma4_class:
-        full_model = Gemma4ForConditionalGeneration.from_pretrained(MODEL_DIR, **load_kwargs)
-        load_path = "Gemma4ForConditionalGeneration"
+    if META:
+        cfg = AutoConfig.from_pretrained(MODEL_DIR, trust_remote_code=True)
+        with torch.device("meta"):
+            if has_gemma4_class:
+                full_model = Gemma4ForConditionalGeneration(cfg)
+                load_path = "Gemma4ForConditionalGeneration(config) on meta"
+            else:
+                full_model = AutoModelForCausalLM.from_config(cfg, trust_remote_code=True)
+                load_path = "AutoModelForCausalLM.from_config on meta"
+        full_model = full_model.eval()
     else:
-        full_model = AutoModelForCausalLM.from_pretrained(MODEL_DIR, **load_kwargs)
-        load_path = "AutoModelForCausalLM"
-    full_model = full_model.to(DEVICE).eval()
+        load_kwargs = dict(
+            torch_dtype=DTYPE, low_cpu_mem_usage=True, trust_remote_code=True,
+            output_hidden_states=True, output_attentions=False,
+        )
+        if has_gemma4_class:
+            full_model = Gemma4ForConditionalGeneration.from_pretrained(MODEL_DIR, **load_kwargs)
+            load_path = "Gemma4ForConditionalGeneration"
+        else:
+            full_model = AutoModelForCausalLM.from_pretrained(MODEL_DIR, **load_kwargs)
+            load_path = "AutoModelForCausalLM"
+        full_model = full_model.to(DEVICE).eval()
     check("Model loaded", True, f"via {load_path}, type={type(full_model).__name__}")
 except Exception as e:
     check("Model loaded", False, str(e))
     logger.error("  Cannot continue without a model (check HF access / transformers version).")
+    if META:
+        logger.error("  (meta build can hit non-meta-safe init on some versions — try DEVICE=cpu instead.)")
     sys.exit(1)
 
 check("NOT PEFT-wrapped", not hasattr(full_model, "peft_config"))
@@ -291,24 +306,30 @@ except Exception as e:
 # ---------------------------------------------------------------------------
 section("Step 7: Forward pass + early-exit hidden state")
 # ---------------------------------------------------------------------------
-try:
-    enc = tokenizer("The capital of France is", return_tensors="pt").to(DEVICE)
-    with torch.no_grad():
-        out = lm(input_ids=enc["input_ids"], attention_mask=enc.get("attention_mask"),
-                 output_hidden_states=True)
-    hs = out.hidden_states  # tuple: embeddings + one per layer
-    widths = sorted({h.shape[-1] for h in hs})
-    check("residual width uniform across all layers", len(widths) == 1,
-          f"widths={widths} (Phase 4.3: early-exit extraction is dim-safe iff uniform)")
-    early = (text_nhl or n_layers) // 4
-    logger.info(f"  hidden_states tuple length: {len(hs)} (= n_layers+1)")
-    logger.info(f"  early-exit layer_idx (n//4): {early} -> hidden state shape {tuple(hs[early].shape)}")
-    check("output exposes .last_hidden_state", hasattr(out, "last_hidden_state"),
-          "Phase 4.2: early-exit ctx encoder reads .last_hidden_state")
-except Exception as e:
-    check("forward pass + hidden states", False, str(e))
-    import traceback
-    traceback.print_exc()
+if META:
+    logger.info("  SKIPPED (meta mode has no real weights to run a forward through).")
+    logger.info(f"  This step only verifies the residual width is uniform = hidden_size="
+                f"{getattr(text_cfg, 'hidden_size', None)} (true by construction). "
+                f"Re-run with DEVICE=cpu/cuda to confirm empirically.")
+else:
+    try:
+        enc = tokenizer("The capital of France is", return_tensors="pt").to(DEVICE)
+        with torch.no_grad():
+            out = lm(input_ids=enc["input_ids"], attention_mask=enc.get("attention_mask"),
+                     output_hidden_states=True)
+        hs = out.hidden_states  # tuple: embeddings + one per layer
+        widths = sorted({h.shape[-1] for h in hs})
+        check("residual width uniform across all layers", len(widths) == 1,
+              f"widths={widths} (Phase 4.3: early-exit extraction is dim-safe iff uniform)")
+        early = (text_nhl or n_layers) // 4
+        logger.info(f"  hidden_states tuple length: {len(hs)} (= n_layers+1)")
+        logger.info(f"  early-exit layer_idx (n//4): {early} -> hidden state shape {tuple(hs[early].shape)}")
+        check("output exposes .last_hidden_state", hasattr(out, "last_hidden_state"),
+              "Phase 4.2: early-exit ctx encoder reads .last_hidden_state")
+    except Exception as e:
+        check("forward pass + hidden states", False, str(e))
+        import traceback
+        traceback.print_exc()
 
 # ---------------------------------------------------------------------------
 section(f"SUMMARY: {passed} passed, {failed} failed")
