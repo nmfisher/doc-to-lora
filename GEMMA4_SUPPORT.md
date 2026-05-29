@@ -35,7 +35,7 @@ Ran `scripts/probe_gemma4.py` against `google/gemma-4-E2B-it`. **Confirmed**: 35
 5. **>50% of layers dropped**: majority group adapts only 16 of 35 (drops `[0–14, 19, 24, 29, 34]`) — a real modeling restriction to weigh.
 6. **`<|think|>` exists** (id 98) — reasoning token is real, not speculative (5.2). Gemma 2/3 `<start_of_turn>`/`<end_of_turn>` are gone.
 
-(Step 7 was skipped under `DEVICE=meta`; re-run with `DEVICE=cpu` to confirm residual width uniform = 1536.)
+**Step 7 (CPU run) confirmed**: residual width uniform = 1536 across all 36 hidden states, output exposes `.last_hidden_state`, early-exit layer `35//4=8` → `(1, seq, 1536)`. Stored weights are a single 10.2 GB bf16 `model.safetensors` (≈ the bf16 VRAM footprint). Empirical CTX_AFFIXES derived — see Phase 5.1.
 
 ---
 
@@ -174,6 +174,11 @@ This was previously done in the text-to-lora repo (`/Volumes/T7/projects/text-to
 - Add a `"google/gemma-4-E2B-it"` entry. Existing entries (`gemma-2-2b-it`, `Mistral-7B-Instruct-v0.2`, `Qwen3-4B-Instruct-2507`) are dicts of `"prefix"`/`"suffix"` → **lists of int token IDs**. No Gemma 3 entry exists, so this follows the pattern.
 - Compute IDs **empirically** by running the tokenizer (262K vocab → IDs differ from Gemma 2).
 - **Simplification from sharing one model**: a single tokenizer serves both encoder and base, so you need exactly one CTX_AFFIXES entry and one set of control-token IDs.
+- **Derived from the probe's chat-template token stream** (`<bos><|turn>user\n … <turn|>\n<|turn>model\n`):
+  ```python
+  "google/gemma-4-E2B-it": {"prefix": [2, 105, 2364, 107], "suffix": [106, 107, 105, 4368, 107]},
+  ```
+  prefix = `<bos> <|turn> user \n`; suffix = `<turn|> \n <|turn> model \n` — same structure as the gemma-2 entry, with Gemma 4 IDs. (IDs are authoritative from the tokenizer; `2364`/`4368` are the `user`/`model` role tokens.)
 
 ### 5.2 Control tokens are SPLIT (v1 had these wrong)
 - Real format: `<|turn>`…`<turn|>`, `<|tool_call>`…`<tool_call|>`, `<|tool>`…`<tool|>` — **not** `<|turn|>` / `<|end_turn|>`. The precedent guessed the single-token form and deleted it.

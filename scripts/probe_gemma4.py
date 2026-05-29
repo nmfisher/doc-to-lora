@@ -74,8 +74,9 @@ try:
 except Exception as e:
     has_gemma4_class = False
     logger.info(f"  (Gemma4ForConditionalGeneration import failed: {e})")
-check("Gemma4ForConditionalGeneration importable", has_gemma4_class,
-      "transformers needs the gemma4 module (Phase 0 bump)")
+ok_g4 = check("Gemma4ForConditionalGeneration importable", has_gemma4_class)
+if not ok_g4:
+    logger.error("    transformers lacks the gemma4 module -> do the Phase 0 bump (>=5.5)")
 
 # Is Gemma 4 registered as a vision/multimodal model in this repo yet? (expected: not yet)
 try:
@@ -256,9 +257,10 @@ for tm in TARGET_MODULES:
     logger.info(f"    {tm}: {cls}  nn.Linear={is_linear}  "
                 f"weight=({w_in},{w_out}) attrs=({a_in},{a_out}){flag}")
 
-check("decoder targets are nn.Linear (forward-patch via nn.Linear.forward is safe)",
-      not any_clippable,
-      "found non-nn.Linear targets -> Phase 2.5 must call the module's own forward")
+ok_linear = check("decoder targets are nn.Linear (forward-patch via nn.Linear.forward is safe)",
+                  not any_clippable)
+if not ok_linear:
+    logger.error("    non-nn.Linear targets found -> Phase 2.5 must call the module's own forward")
 if any_mismatch:
     logger.info("  -> .in_features/.out_features are UNRELIABLE here; use weight.shape (confirms Phase 2.1)")
 else:
@@ -297,8 +299,10 @@ logger.info("\n  empirical apply_chat_template (read CTX_AFFIXES prefix/suffix o
 try:
     chat = [{"role": "user", "content": "PROMPT"}, {"role": "assistant", "content": "REPLY"}]
     ids = tokenizer.apply_chat_template(chat, tokenize=True, add_generation_prompt=False)
-    if isinstance(ids, dict):                      # transformers 5.x returns a dict
+    try:                               # dict / BatchEncoding (a UserDict, not a dict) -> id list
         ids = ids["input_ids"]
+    except (TypeError, KeyError):
+        pass                           # already a plain list
     if ids and isinstance(ids[0], (list, tuple)):  # un-batch if nested
         ids = ids[0]
     ids = [int(t) for t in ids]
