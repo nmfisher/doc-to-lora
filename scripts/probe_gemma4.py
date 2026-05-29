@@ -297,9 +297,15 @@ logger.info("\n  empirical apply_chat_template (read CTX_AFFIXES prefix/suffix o
 try:
     chat = [{"role": "user", "content": "PROMPT"}, {"role": "assistant", "content": "REPLY"}]
     ids = tokenizer.apply_chat_template(chat, tokenize=True, add_generation_prompt=False)
+    if isinstance(ids, dict):                      # transformers 5.x returns a dict
+        ids = ids["input_ids"]
+    if ids and isinstance(ids[0], (list, tuple)):  # un-batch if nested
+        ids = ids[0]
+    ids = [int(t) for t in ids]
     logger.info(f"    full user+assistant ids: {ids}")
     for tid in ids:
         logger.info(f"      {tid:>7d}  {tokenizer.decode([tid])!r}")
+    check("apply_chat_template works", True)
 except Exception as e:
     check("apply_chat_template works", False, str(e))
 

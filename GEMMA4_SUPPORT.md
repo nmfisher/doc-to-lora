@@ -23,6 +23,20 @@ Net effect: **both the base-model path (Phases 1–3, 6) and the encoder path (P
 
 **Memory**: Gemma 4 E2B is ~5.1B full params (Per-Layer Embeddings inflate the count past the "effective 2B"), so two instances roughly double base memory. The encoder is early-exit, so truncating it to the first `num_hidden_layers // 4 + 1` layers is a valid optimization — check whether the precedent did this.
 
+## Probe results (transformers 5.9.0, `DEVICE=meta`, 2026-05-29)
+
+Ran `scripts/probe_gemma4.py` against `google/gemma-4-E2B-it`. **Confirmed**: 35 layers (only via `text_config.num_hidden_layers`; no top-level), 4 dimension profiles, majority group **16/35** = `[15,16,17,18,20,21,22,23,25,26,27,28,30,31,32,33]` (non-contiguous), split control tokens (`<|turn>`=105/`<turn|>`=106, `<|tool_call>`=48/49, `<|tool>`=46/47), `hidden_size`=1536, vocab 262144, ctx 131072, vision + audio towers present.
+
+**Empirical corrections to the plan:**
+1. **Extraction path is `.model.language_model`** (→ `Gemma4TextModel`) — one level deeper than Gemma 3. Fixes Phase 1.2.
+2. **Decoder targets are plain `nn.Linear` with accurate `.in_features`/`.out_features`.** `Gemma4ClippableLinear` lives only in the vision/audio towers, not the decoder → the `weight.shape` workaround (2.1) and own-forward workaround (2.5) are **defensive-only, not required**; `nn.Linear.forward` patching is safe. Phase 2 is simpler than feared.
+3. **The 16-layer majority group has NO `k_proj`/`v_proj`** (unified/shared KV). `target_modules` there = **`q_proj, o_proj, gate_proj, up_proj, down_proj`** — drop k/v. This is the "filter to modules present" case (3.3); k/v exist only in the smaller (6144-MLP) profiles.
+4. **MLP width varies** (`gate/up` 6144 vs 12288) — MLP-only does not escape filtering.
+5. **>50% of layers dropped**: majority group adapts only 16 of 35 (drops `[0–14, 19, 24, 29, 34]`) — a real modeling restriction to weigh.
+6. **`<|think|>` exists** (id 98) — reasoning token is real, not speculative (5.2). Gemma 2/3 `<start_of_turn>`/`<end_of_turn>` are gone.
+
+(Step 7 was skipped under `DEVICE=meta`; re-run with `DEVICE=cpu` to confirm residual width uniform = 1536.)
+
 ---
 
 ## Context
@@ -61,7 +75,7 @@ This was previously done in the text-to-lora repo (`/Volumes/T7/projects/text-to
 - Import `Gemma4ForConditionalGeneration` (guard for older transformers if you keep any back-compat).
 
 ### 1.2 Load + extract `.language_model` (pick ONE strategy)
-- Mirror the existing Gemma 3 path (`model_loading.py:157-158`): load with `Gemma4ForConditionalGeneration.from_pretrained(...)`, then `model = model.language_model`.
+- Mirror the existing Gemma 3 path (`model_loading.py:157-158`): load with `Gemma4ForConditionalGeneration.from_pretrained(...)`, then `model = model.model.language_model` — **the probe found Gemma 4 nests one level deeper than Gemma 3** (result is a `Gemma4TextModel`).
 - **Resolves v1 contradiction**: do **not** use `AutoModelForCausalLM` for Gemma 4 in this repo — vision models go through the `Gemma*ForConditionalGeneration` branch. (text-to-lora used `AutoModelForCausalLM` + `trust_remote_code` auto-dispatch — a valid *alternative*, but don't mix the two.)
 - `use_cache` is already popped for vision models (`model_loading.py:128-131`).
 - Skip flash-attention (use `"eager"` or default).
@@ -187,7 +201,7 @@ This was previously done in the text-to-lora repo (`/Volumes/T7/projects/text-to
 
 ### 7.1 Config
 - **New file**: `configs/main_exp/gemma4_e2b_closed_qa.yaml`. Point **both** the base (`model_name_or_path`) **and** `ctx_encoder_model_name_or_path` at `google/gemma-4-E2B-it`.
-- Targets: start MLP-only (`["down_proj", "gate_proj", "up_proj"]`) to shrink the target surface — **but Phase 3 layer filtering is still required**: Gemma 4's MLP widths also vary across profiles (the precedent saw `gate_proj` 6144 vs 12288), so MLP-only does *not* escape the heterogeneity. Expand to attention once filtering is solid.
+- Targets: the 16-layer majority group exposes **`q_proj, o_proj, gate_proj, up_proj, down_proj`** only — the probe confirmed these layers have **no `k_proj`/`v_proj`** (unified/shared KV), so drop k/v. Start MLP-only (`["down_proj", "gate_proj", "up_proj"]`) to shrink the surface; Phase 3 filtering is still required (probe saw `gate_proj` 6144 vs 12288 across profiles). k/v exist only in the other, smaller profiles.
 - Context encoder: early-exit, `layer_idx = text_config.num_hidden_layers // 4`.
 
 ### 7.2 Launch script
