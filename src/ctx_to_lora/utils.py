@@ -6,9 +6,11 @@ import os
 import random
 import string
 import time
+from collections import defaultdict
 from collections.abc import Iterable
 from contextlib import contextmanager
 from enum import Enum
+from operator import attrgetter
 
 import torch
 import yaml
@@ -46,6 +48,76 @@ def get_layers(model):
 
 def get_num_layers(model):
     return len(get_layers(model))
+
+
+_ATTN_TARGETS = ("q_proj", "k_proj", "v_proj", "o_proj", "qkv_proj")
+_MLP_TARGETS = ("gate_proj", "up_proj", "down_proj")
+
+
+def get_layer_dim_profile(layer, target_modules) -> tuple:
+    """Hashable signature of (in_features, out_features) per target_module in this layer.
+    Missing modules are encoded as (mname, None, None) so they don't collapse with
+    layers that do have the module."""
+    if not isinstance(target_modules, (list, tuple, set)):
+        return ()
+    profile = []
+    for mname in sorted(target_modules):
+        if mname in _ATTN_TARGETS:
+            path = f"self_attn.{mname}"
+        elif mname in _MLP_TARGETS:
+            path = f"mlp.{mname}"
+        else:
+            profile.append((mname, None, None))
+            continue
+        try:
+            module = attrgetter(path)(layer)
+        except AttributeError:
+            module = None
+        if isinstance(module, torch.nn.Linear):
+            profile.append((mname, module.in_features, module.out_features))
+        else:
+            profile.append((mname, None, None))
+    return tuple(profile)
+
+
+def select_majority_dim_group(model, target_modules) -> tuple[int, ...]:
+    """Group layers by dim profile across target_modules; return indices of the
+    largest group as a tuple of ints. Tie-break by lowest first-layer index.
+
+    For homogeneous models (Gemma 2, Llama, etc.) every layer has the same
+    profile, so this returns tuple(range(num_layers)) — identical to the old
+    arange(num_layers) behavior. For heterogeneous models (Gemma 4 has 4
+    dim profiles across 35 layers) this returns the largest profile's indices,
+    typically non-contiguous."""
+    layers = get_layers(model)
+    n_layers = len(layers)
+    if not isinstance(target_modules, (list, tuple, set)):
+        return tuple(range(n_layers))
+    groups: dict[tuple, list[int]] = defaultdict(list)
+    for idx, layer in enumerate(layers):
+        groups[get_layer_dim_profile(layer, target_modules)].append(idx)
+    best_profile = max(
+        groups.keys(),
+        key=lambda p: (len(groups[p]), -groups[p][0]),
+    )
+    indices = tuple(groups[best_profile])
+    if len(groups) > 1:
+        logger.info(
+            f"Layer-dim grouping: {len(groups)} distinct profiles across "
+            f"{n_layers} layers; selected majority group of {len(indices)} layer(s)."
+        )
+        for p, idxs in sorted(groups.items(), key=lambda kv: -len(kv[1])):
+            marker = " <-- selected" if p == best_profile else ""
+            logger.debug(f"  group ({len(idxs)} layers) layers={idxs}{marker}")
+    # Sanity: any None dims in the selected profile signal a target_module that
+    # doesn't exist on these layers (would crash attrgetter at apply time).
+    missing = [m for (m, d_in, d_out) in best_profile if d_in is None or d_out is None]
+    if missing:
+        logger.warning(
+            f"target_modules {missing} not found on selected layers — drop them "
+            f"from target_modules in your config."
+        )
+    return indices
 
 
 def get_base_model(model):

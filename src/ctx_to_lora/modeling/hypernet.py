@@ -53,6 +53,7 @@ from ctx_to_lora.utils import (
     get_num_layers,
     get_peft_in_out_features,
     get_peft_modules,
+    select_majority_dim_group,
 )
 
 logger = logging.getLogger()
@@ -100,7 +101,13 @@ def get_hypernet_config(
     if lora_config is not None:
         num_modules += len(lora_config.target_modules)
     num_extra_modules = len(hypernet_args.extra_modules or [])
-    indices = torch.arange(get_num_layers(model), device=model.device)
+    # Pick layer_indices by dim-profile grouping. Homogeneous models (Gemma 2,
+    # Llama) get tuple(range(num_layers)) — identity. Heterogeneous models
+    # (Gemma 4: 4 profiles across 35 layers) get the majority group, typically
+    # non-contiguous. Tuple of ints, not a tensor, for stable indexing.
+    indices = select_majority_dim_group(
+        model, lora_config.target_modules if lora_config is not None else None
+    )
     return HypernetConfig(
         **vars(hypernet_args),
         base_hidden_size=model.config.hidden_size,
