@@ -155,11 +155,12 @@ def main():
     ############ Model setup
     if not ctx_args.from_pretrained_checkpoint:
         model_name = model_args.model_name_or_path
+        peft_config = get_lora_config(model_name, **vars(lora_args))
         base_model, tokenizer = get_model_and_tokenizer(
             **vars(model_args),
             train=True,
             requires_grad=False,
-            peft_config=get_lora_config(model_name, **vars(lora_args)),
+            peft_config=peft_config,
         )
         ctx_name = ctx_encoder_args.ctx_encoder_model_name_or_path
         if ctx_name is not None:
@@ -185,6 +186,7 @@ def main():
                 hypernet_args,
                 aggregator_args,
                 ctx_encoder_args,
+                peft_config=peft_config,
             )
             if ctx_encoder_args.layer_idx is None:
                 ctx_encoder_args.layer_idx = (

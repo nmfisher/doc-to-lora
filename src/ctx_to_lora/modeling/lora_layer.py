@@ -80,6 +80,10 @@ def apply_lora_to_layers(
     position_ids: Integer[Tensor, "bs seq_len"] = None,
 ) -> None:
     layers = get_layers(model)
+    # generated_loras tensors are sized along dim=1 by len(layer_indices), so we
+    # index by position (pos), not raw layer_idx. Identity for contiguous
+    # layer_indices == range(N); required for non-contiguous (Gemma 4 majority group).
+    layer_indices = list(layer_indices)
     if position_ids is not None:
         position_ids = position_ids.squeeze(0)
         seq_lens = position_ids[torch.where(position_ids == 0)[0][1:] - 1]
@@ -89,7 +93,7 @@ def apply_lora_to_layers(
         seq_lens += 1
         tot_len = seq_lens.sum().item()
     tot_q = n_qs.sum().item()
-    for layer_idx in layer_indices:
+    for pos, layer_idx in enumerate(layer_indices):
         layer = layers[layer_idx]
 
         for mname in generated_loras:
@@ -98,8 +102,8 @@ def apply_lora_to_layers(
             elif mname in ["down_proj", "up_proj", "gate_proj"]:
                 long_mname = f"mlp.{mname}"
             module = attrgetter(long_mname)(layer)
-            A = generated_loras[mname]["A"][:, layer_idx]
-            B = generated_loras[mname]["B"][:, layer_idx]
+            A = generated_loras[mname]["A"][:, pos]
+            B = generated_loras[mname]["B"][:, pos]
             module.forward = partial(module.forward, n_qs=n_qs, tot_q=tot_q, A=A, B=B)
             if position_ids is not None:
                 module.forward = partial(

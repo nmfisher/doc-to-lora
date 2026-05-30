@@ -161,31 +161,36 @@ def save_yaml(data, path):
         yaml.dump(data, file)
 
 
-def get_peft_modules(model: PeftModel, peft_config: PeftConfig) -> list[dict[str, str]]:
+def get_peft_modules(model, peft_config: PeftConfig) -> list[dict[str, str]]:
+    # Non-PEFT path (Gemma 4): the model is bare, so target modules are plain
+    # nn.Linear instances rather than BaseTunerLayer wrappers.
+    leaf_type = BaseTunerLayer if isinstance(model, PeftModel) else torch.nn.Linear
     return [
         {"name": name, "module": module}
         for name, module in model.named_modules()
         if name.split(".")[-1] in peft_config.target_modules
-        and isinstance(module, BaseTunerLayer)
+        and isinstance(module, leaf_type)
         and check_target_module_exists(peft_config, name)
     ]
 
 
 def get_peft_in_out_features(
-    model: PeftModel,
+    model,
     peft_config: PeftConfig | None = None,
 ) -> tuple[dict[str, int], dict[str, int]]:
     if peft_config is None:
         return None, None
+    is_peft = isinstance(model, PeftModel)
     in_features = dict()
     out_features = dict()
     for module_info in get_peft_modules(model, peft_config):
         module_name = module_info["name"]
         module = module_info["module"]
-        # support just Linear layer for now
-        # all modules should be a leave module that is Linear layer
-        assert isinstance(module.base_layer, torch.nn.Linear), (
-            "all modules should be a leave module that is Linear layer"
+        # In PEFT mode the LoRA wrapper exposes `.base_layer`; in the bare-model
+        # path (Gemma 4) the module IS the Linear leaf.
+        leaf = module.base_layer if is_peft else module
+        assert isinstance(leaf, torch.nn.Linear), (
+            "all modules should be a leaf Linear layer"
         )
 
         # this should always pass
@@ -209,17 +214,21 @@ def generated_lora_to_state_dict(
     target_modules: list[str],
     layer_indices: Iterable[int],
 ) -> dict:
+    # Position-based indexing: module_names[t] and lora_dict[t]["A"/"B"] are both
+    # sized len(layer_indices). For contiguous layer_indices == range(N) this is
+    # identical to the old raw-index scheme; required for non-contiguous (Gemma 4).
+    layer_indices = list(layer_indices)
     lora_state_dict = dict()
     for target_module in target_modules:
-        for layer_idx in layer_indices:
-            for module_name in module_names[target_module][layer_idx]:
+        for pos, _layer_idx in enumerate(layer_indices):
+            for module_name in module_names[target_module][pos]:
                 if "lora_A" in module_name:
                     lora_state_dict[module_name] = (
-                        lora_dict[target_module]["A"][layer_idx].cpu().contiguous()
+                        lora_dict[target_module]["A"][pos].cpu().contiguous()
                     )
                 elif "lora_B" in module_name:
                     lora_state_dict[module_name] = (
-                        lora_dict[target_module]["B"][layer_idx].cpu().contiguous()
+                        lora_dict[target_module]["B"][pos].cpu().contiguous()
                     )
                 else:
                     raise ValueError(f"Unexpected module name: {module_name}")
@@ -227,23 +236,46 @@ def generated_lora_to_state_dict(
 
 
 def get_lora_module_names(
-    model: PeftModel,
+    model,
     target_modules: list[str],
     layer_indices: Iterable[int],
 ) -> dict[str, list[str]]:
+    layer_indices = list(layer_indices)
     module_names = {
         target_module: [[] for _ in range(len(layer_indices))]
         for target_module in target_modules
     }
-    for k in get_peft_model_state_dict(model):
-        if "lora" not in k:
-            continue
-        layer_idx = int(k.split("layers.")[-1].split(".")[0])
-        if layer_idx in layer_indices:
-            for target_module in target_modules:
-                if target_module in k:
-                    module_names[target_module][layer_idx].append(k)
-                    break
+    if isinstance(model, PeftModel):
+        for k in get_peft_model_state_dict(model):
+            if "lora" not in k:
+                continue
+            layer_idx = int(k.split("layers.")[-1].split(".")[0])
+            if layer_idx in layer_indices:
+                pos = layer_indices.index(layer_idx)
+                for target_module in target_modules:
+                    if target_module in k:
+                        module_names[target_module][pos].append(k)
+                        break
+    else:
+        # Non-PEFT path (Gemma 4): the bare model has no LoRA submodules, so
+        # synthesize the expected lora_A/lora_B key names from each target Linear.
+        for name, module in model.named_modules():
+            if not isinstance(module, torch.nn.Linear):
+                continue
+            leaf = name.split(".")[-1]
+            if leaf not in target_modules:
+                continue
+            if "layers." not in name:
+                continue
+            try:
+                layer_idx = int(name.split("layers.")[-1].split(".")[0])
+            except ValueError:
+                continue
+            if layer_idx not in layer_indices:
+                continue
+            pos = layer_indices.index(layer_idx)
+            module_names[leaf][pos].append(f"{name}.lora_A.weight")
+            module_names[leaf][pos].append(f"{name}.lora_B.weight")
     return module_names
 
 

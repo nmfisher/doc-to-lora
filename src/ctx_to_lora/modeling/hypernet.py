@@ -86,11 +86,18 @@ def get_hypernet_config(
     hypernet_args: HypernetArguments,
     aggregator_args: AggregatorArguments,
     ctx_encoder_args: CtxEncoderArguments,
+    peft_config: PeftConfig | None = None,
 ):
+    # peft_config kwarg is required for the non-PEFT path (Gemma 4); bare models
+    # don't expose `.peft_config`, so caller must thread it through.
     num_modules = 0
-    lora_config = getattr(model, "peft_config", None)
+    if peft_config is not None:
+        lora_config = peft_config
+    else:
+        lora_config = getattr(model, "peft_config", None)
+        if lora_config is not None:
+            lora_config = lora_config["default"]
     if lora_config is not None:
-        lora_config = lora_config["default"]
         num_modules += len(lora_config.target_modules)
     num_extra_modules = len(hypernet_args.extra_modules or [])
     indices = torch.arange(get_num_layers(model), device=model.device)
@@ -114,10 +121,17 @@ def get_hypernet_config(
     )
 
 
-def get_init_peft_weights(model: PeftModel, peft_config: PeftConfig = None):
+def get_init_peft_weights(model, peft_config: PeftConfig = None):
     if peft_config is None:
-        peft_config = model.peft_config["default"]
+        peft_config = getattr(model, "peft_config", {}).get("default")
+    if peft_config is None:
+        return {}
     peft_weights = {module_name: dict() for module_name in peft_config.target_modules}
+    # Non-PEFT path (Gemma 4): the bare model has no LoRA adapter submodules to
+    # read init values from. Result is only used for debug-logging in
+    # ModulatedPretrainedModel._bias_hyper_init, so an empty per-module dict is fine.
+    if not isinstance(model, PeftModel):
+        return peft_weights
     adapter_name = "default"
     for module_name, module in model.named_modules():
         if not check_target_module_exists(peft_config, module_name):
@@ -440,7 +454,7 @@ class HyperLoRA(nn.Module):
 class ModulatedPretrainedModel(nn.Module):
     def __init__(
         self,
-        base_model: PeftModel,
+        base_model,
         hypernet_config: HypernetConfig,
         ctx_encoder_args: CtxEncoderArguments,
         use_base_input_as_ctx: bool = False,
@@ -452,7 +466,13 @@ class ModulatedPretrainedModel(nn.Module):
         assert not use_base_input_as_ctx
         super().__init__()
         self.device = base_model.device
-        self.peft_config = base_model.peft_config["default"]
+        # peft_config lives on hypernet_config; for Gemma 4 (non-PEFT path) the
+        # bare base_model has no `.peft_config` attribute, so we don't read it
+        # from there anymore. Falls back to base_model.peft_config["default"]
+        # if hypernet_config doesn't carry it (legacy / generic case).
+        self.peft_config = hypernet_config.lora_config
+        if self.peft_config is None and hasattr(base_model, "peft_config"):
+            self.peft_config = base_model.peft_config["default"]
         self.hypernet_config = hypernet_config
         self.ctx_encoder_args = ctx_encoder_args
         self.use_base_input_as_ctx = use_base_input_as_ctx
@@ -521,10 +541,11 @@ class ModulatedPretrainedModel(nn.Module):
                 )
 
     def _init_model(self):
-        # disable adapter of the base model
-        # this only works with LoRA(?)
-        # we disable to avoid peft lora computation
-        self.base_model.disable_adapter_layers()
+        # disable adapter of the base model so PEFT's LoRA path is inert and the
+        # hypernet's LoRA (patched into module.forward) is the only contribution.
+        # Skip for bare models (Gemma 4 non-PEFT path) — no adapter to disable.
+        if isinstance(self.base_model, PeftModel):
+            self.base_model.disable_adapter_layers()
 
         self.hypernet = (
             HyperLoRA(self.hypernet_config).to(self.device).to(torch.float32)
