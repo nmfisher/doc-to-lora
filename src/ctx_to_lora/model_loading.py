@@ -13,6 +13,11 @@ from transformers import (
     Gemma3ForConditionalGeneration,
 )
 
+try:
+    from transformers import Gemma4ForConditionalGeneration
+except ImportError:  # transformers < 5.5; Phase 0 bump required to use Gemma 4
+    Gemma4ForConditionalGeneration = None
+
 logger = logging.getLogger()
 
 GEMMA_VISION_MODELS = [
@@ -22,8 +27,12 @@ GEMMA_VISION_MODELS = [
 ]
 
 
+def check_is_gemma4(model_name):
+    return "gemma-4" in model_name.lower()
+
+
 def check_is_vision_model(model_name):
-    return model_name in GEMMA_VISION_MODELS
+    return model_name in GEMMA_VISION_MODELS or check_is_gemma4(model_name)
 
 
 def get_model_and_tokenizer(
@@ -120,7 +129,10 @@ def get_model(
     )
 
     if use_flash_attn:
-        if "gte" not in model_name_or_path:
+        if check_is_gemma4(model_name_or_path):
+            # Gemma 4 ships its own optimized attention; keep "eager"
+            pass
+        elif "gte" not in model_name_or_path:
             model_init_kwargs["attn_implementation"] = "flash_attention_2"
         elif "gte" in model_name_or_path:
             model_init_kwargs["attn_implementation"] = "sdpa"
@@ -148,15 +160,28 @@ def get_model(
         model_init_kwargs["quantization_config"] = bnb_config
 
     logger.debug(f"Model init kwargs: {model_init_kwargs}")
+    is_gemma4 = check_is_gemma4(model_name_or_path)
     if not is_vision_model:
         if is_bidir_model:
             model = AutoModel.from_pretrained(**model_init_kwargs)
         else:
             model = AutoModelForCausalLM.from_pretrained(**model_init_kwargs)
+    elif is_gemma4:
+        if Gemma4ForConditionalGeneration is None:
+            raise ImportError(
+                "Gemma 4 requires transformers>=5.5 (do the Phase 0 bump)."
+            )
+        model = Gemma4ForConditionalGeneration.from_pretrained(**model_init_kwargs)
+        # Gemma 4 nests one level deeper than Gemma 3 (probe-confirmed):
+        # full_model.model.language_model -> Gemma4TextModel
+        model = model.model.language_model
     else:
         model = Gemma3ForConditionalGeneration.from_pretrained(**model_init_kwargs)
         model = model.language_model
-    if peft_config is not None:
+    # Skip PEFT wrap for Gemma 4: the hypernet injects LoRA at runtime via the
+    # non-PEFT path (Phase 2). peft_config is still threaded by the caller for
+    # the hypernet to consume directly.
+    if peft_config is not None and not is_gemma4:
         model = PeftModel(model, peft_config)
     model.train(train)
     for name, param in model.named_parameters():
