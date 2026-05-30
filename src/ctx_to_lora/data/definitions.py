@@ -10,6 +10,12 @@ CTX_AFFIXES = {
         "prefix": [2, 106, 1645, 110],  # <bos><start_of_turn>user\n\n\n
         "suffix": [107, 108, 106, 2516, 108],  # <end_of_turn>\n<start_of_turn>model\n
     },
+    "google/gemma-4-E2B-it": {
+        # Gemma 4 shifts turn tokens by one vs. Gemma 2: <bos>=2, <start_of_turn>=105,
+        # <end_of_turn>=106, \n=107. Values derived from the probe (scripts/probe_gemma4.py).
+        "prefix": [2, 105, 2364, 107],  # <bos><start_of_turn>user\n
+        "suffix": [106, 107, 105, 4368, 107],  # <end_of_turn>\n<start_of_turn>model\n
+    },
     "mistralai/Mistral-7B-Instruct-v0.2": {
         "prefix": [1, 733, 16289, 28793, 28705, 13, 13],  # `<s> [INST] \n\n`
         "suffix": [733, 28748, 16289, 28793],  # ` [/INST] `
