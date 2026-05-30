@@ -350,24 +350,31 @@ section("Step 8: Eval-path readiness — .generate() on the extracted model")
 # resulting class decides whether eval works as-is or needs a wrapper.
 lm_class = type(lm).__name__
 has_generate = callable(getattr(lm, "generate", None))
-check(
-    "extracted model exposes .generate()",
-    has_generate,
-    f"class={lm_class}",
-)
+logger.info(f"  bare extracted class: {lm_class}, has .generate: {has_generate}")
 if not has_generate:
     logger.info(
-        "  -> ModulatedPretrainedModel.generate would crash. Either extract one"
-        " level less (use Gemma4ForCausalLM instead of going through"
-        " .model.language_model), or add a generate wrapper in"
-        " ModulatedPretrainedModel that drives the full"
-        " Gemma4ForConditionalGeneration."
+        "  -> Bare model has no GenerationMixin. model_loading.py works around"
+        " this by delegating .generate from the bare model to the full"
+        " Gemma4ForConditionalGeneration wrapper (which shares weights with"
+        " the bare model). Verifying that pattern below."
     )
+
+# Mirror the repo's delegation pattern (model_loading.py:get_model Gemma 4 branch).
+delegated_ok = False
+if full_model is not None and callable(getattr(full_model, "generate", None)):
+    lm._gemma4_full_wrapper = full_model
+    lm.generate = full_model.generate
+    delegated_ok = callable(getattr(lm, "generate", None))
+check(
+    "generate accessible via wrapper-delegation pattern",
+    delegated_ok,
+    "model_loading.py uses `model.generate = full_model.generate`",
+)
 
 if META:
     logger.info("  SKIPPED real .generate() call (meta mode has no weights).")
-elif not has_generate:
-    logger.info("  SKIPPED real .generate() call (.generate not available).")
+elif not delegated_ok:
+    logger.info("  SKIPPED real .generate() call (delegation pattern not available).")
 else:
     try:
         enc = tokenizer("The capital of France is", return_tensors="pt").to(DEVICE)
@@ -381,12 +388,12 @@ else:
         new_tokens = gen[0, enc["input_ids"].shape[-1]:].tolist()
         decoded = tokenizer.decode(new_tokens, skip_special_tokens=False)
         check(
-            "tiny generation succeeded",
+            "tiny generation via delegation succeeded",
             len(new_tokens) > 0,
             f"new_tokens={new_tokens} -> {decoded!r}",
         )
     except Exception as e:
-        check("tiny generation succeeded", False, str(e))
+        check("tiny generation via delegation succeeded", False, str(e))
         import traceback
         traceback.print_exc()
 

@@ -62,6 +62,13 @@ def get_model_and_tokenizer(
     model.config.pad_token_id = tokenizer.pad_token_id
     if getattr(model, "generation_config", None):
         model.generation_config.pad_token_id = tokenizer.pad_token_id
+    # Gemma 4: also propagate pad_token_id onto the full wrapper, since
+    # generate() flows through it (see get_model for the delegation setup).
+    wrapper = getattr(model, "_gemma4_full_wrapper", None)
+    if wrapper is not None:
+        wrapper.config.pad_token_id = tokenizer.pad_token_id
+        if getattr(wrapper, "generation_config", None):
+            wrapper.generation_config.pad_token_id = tokenizer.pad_token_id
     return model, tokenizer
 
 
@@ -166,10 +173,18 @@ def get_model(
             raise ImportError(
                 "Gemma 4 requires transformers>=5.5 (do the Phase 0 bump)."
             )
-        model = Gemma4ForConditionalGeneration.from_pretrained(**model_init_kwargs)
+        full_model = Gemma4ForConditionalGeneration.from_pretrained(**model_init_kwargs)
         # Gemma 4 nests one level deeper than Gemma 3 (probe-confirmed):
         # full_model.model.language_model -> Gemma4TextModel
-        model = model.model.language_model
+        model = full_model.model.language_model
+        # Gemma4TextModel doesn't subclass GenerationMixin, so .generate is
+        # missing — would crash eval at hypernet.py's `self.base_model.generate(...)`.
+        # Delegate to the full wrapper (which inherits GenerationMixin and routes
+        # its forward back through this same text model, picking up our LoRA
+        # patches). Bare + wrapper share weights, so this only keeps a Python
+        # object alive — no extra GPU memory.
+        model._gemma4_full_wrapper = full_model
+        model.generate = full_model.generate
     else:
         model = Gemma3ForConditionalGeneration.from_pretrained(**model_init_kwargs)
         model = model.language_model
