@@ -342,6 +342,55 @@ else:
         traceback.print_exc()
 
 # ---------------------------------------------------------------------------
+section("Step 8: Eval-path readiness — .generate() on the extracted model")
+# ---------------------------------------------------------------------------
+# ModulatedPretrainedModel.generate calls self.base_model.generate(...). For
+# Gemma 3 the extraction lands on Gemma3ForCausalLM (inherits GenerationMixin).
+# For Gemma 4 we go one level deeper (model.model.language_model); the
+# resulting class decides whether eval works as-is or needs a wrapper.
+lm_class = type(lm).__name__
+has_generate = callable(getattr(lm, "generate", None))
+check(
+    "extracted model exposes .generate()",
+    has_generate,
+    f"class={lm_class}",
+)
+if not has_generate:
+    logger.info(
+        "  -> ModulatedPretrainedModel.generate would crash. Either extract one"
+        " level less (use Gemma4ForCausalLM instead of going through"
+        " .model.language_model), or add a generate wrapper in"
+        " ModulatedPretrainedModel that drives the full"
+        " Gemma4ForConditionalGeneration."
+    )
+
+if META:
+    logger.info("  SKIPPED real .generate() call (meta mode has no weights).")
+elif not has_generate:
+    logger.info("  SKIPPED real .generate() call (.generate not available).")
+else:
+    try:
+        enc = tokenizer("The capital of France is", return_tensors="pt").to(DEVICE)
+        with torch.no_grad():
+            gen = lm.generate(
+                input_ids=enc["input_ids"],
+                attention_mask=enc.get("attention_mask"),
+                max_new_tokens=4,
+                do_sample=False,
+            )
+        new_tokens = gen[0, enc["input_ids"].shape[-1]:].tolist()
+        decoded = tokenizer.decode(new_tokens, skip_special_tokens=False)
+        check(
+            "tiny generation succeeded",
+            len(new_tokens) > 0,
+            f"new_tokens={new_tokens} -> {decoded!r}",
+        )
+    except Exception as e:
+        check("tiny generation succeeded", False, str(e))
+        import traceback
+        traceback.print_exc()
+
+# ---------------------------------------------------------------------------
 section(f"SUMMARY: {passed} passed, {failed} failed")
 # ---------------------------------------------------------------------------
 logger.info("Compare the numbers above against GEMMA4_SUPPORT.md assumptions:")
@@ -350,4 +399,5 @@ logger.info(f"  - dimension profiles: {len(groups)}  (plan assumed ~4)")
 logger.info(f"  - majority group: {len(largest_group)}/{n_layers}  (plan assumed 16/35)")
 logger.info("  - decoder target class + in_features reliability: see Step 5")
 logger.info("  - real control tokens: see Step 6")
+logger.info("  - eval-time .generate() availability: see Step 8")
 sys.exit(1 if failed else 0)
