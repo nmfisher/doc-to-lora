@@ -6,12 +6,15 @@ Catches Phase 1-4 wiring bugs (load extraction, non-PEFT helpers, layer
 grouping, encoder load) without needing self_gen data.
 
 Run from repo root:
-    python scripts/smoke_gemma4.py
+    python scripts/smoke_gemma4.py                            # cuda + bf16 (~20 GB VRAM)
+    DEVICE=cpu DTYPE=bfloat16 python scripts/smoke_gemma4.py  # ~20 GB RAM, slow (~10 min)
 
 Env vars:
     MODEL_DIR    base + encoder checkpoint (default google/gemma-4-E2B-it)
+    DEVICE       cuda (default) or cpu
+    DTYPE        bfloat16 (default), float16, float32
 
-Memory: ~20 GB at bf16 (base + encoder copies). Use a 24 GB+ GPU.
+Memory: ~20 GB total (base + encoder copies) at bf16. Use a 24 GB+ GPU.
 """
 import logging
 import os
@@ -38,6 +41,12 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger()
 
 MODEL = os.environ.get("MODEL_DIR", "google/gemma-4-E2B-it")
+DEVICE = os.environ.get("DEVICE", "cuda")
+DTYPE = {
+    "float32": torch.float32,
+    "float16": torch.float16,
+    "bfloat16": torch.bfloat16,
+}[os.environ.get("DTYPE", "bfloat16")]
 TARGET_MODULES = ["q_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
 
 
@@ -45,7 +54,7 @@ def section(title):
     print(f"\n{'=' * 70}\n{title}\n{'=' * 70}")
 
 
-section(f"Step 1: load base + tokenizer ({MODEL})")
+section(f"Step 1: load base + tokenizer ({MODEL}, {DEVICE}, {DTYPE})")
 peft_config = get_lora_config(
     MODEL, lora_r=8, lora_dropout=0.0, target_modules=TARGET_MODULES
 )
@@ -55,6 +64,8 @@ base_model, tokenizer = get_model_and_tokenizer(
     requires_grad=False,
     use_flash_attn=False,
     peft_config=peft_config,
+    device=DEVICE,
+    dtype=DTYPE,
 )
 print(f"  base class:  {type(base_model).__name__}")
 print(f"  num layers:  {len(base_model.layers)}")
