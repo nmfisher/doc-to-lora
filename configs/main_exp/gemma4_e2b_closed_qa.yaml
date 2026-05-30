@@ -1,0 +1,49 @@
+# Gemma 4 E2B-it closed-QA training config.
+#
+# Differs from gemma-2 / mistral / qwen counterparts in two places:
+#   1. target_modules excludes k_proj and v_proj. Gemma 4 has 4 dimension
+#      profiles across its 35 layers; the largest profile (16 layers, picked
+#      by select_majority_dim_group) shares only q/o/gate/up/down. KV is
+#      unified or shaped differently in some profile groups, so including
+#      k_proj or v_proj here would either (a) push the layer-grouping picker
+#      onto a smaller profile or (b) flag the dropped modules at runtime.
+#   2. Data paths reference self_gen/google/gemma-4-E2B-it/* which must be
+#      generated first (see scripts/main_exp/gen_data.sh). The pipeline is
+#      identical to the gemma-2 self_gen flow; only the q-generation model
+#      changes.
+
+# LoRA
+lora_r: 8
+lora_dropout: 0.0
+target_modules:
+  - q_proj
+  - o_proj
+  - gate_proj
+  - up_proj
+  - down_proj
+
+use_kl_loss: true
+
+ctx_encoder_type: per_layer_activations
+n_latent_queries: 8
+num_blocks: 9
+num_self_attn_per_block: 0
+
+gradient_accumulation_steps: 11
+max_packed_inp_len: 6144
+max_packed_ctx_len: 6144
+
+# data
+train_ds_names:
+  - self_gen/google/gemma-4-E2B-it_temp_0.0_closed_qa_prob_1.0/fw_qa_v2/min_0_to_2000/train/*level_1*.parquet
+  - self_gen/google/gemma-4-E2B-it_temp_0.0_closed_qa_prob_0.0/pwc_compact
+  - self_gen/google/gemma-4-E2B-it_temp_0.0_closed_qa_prob_1.0/squad_compact
+  - self_gen/google/gemma-4-E2B-it_temp_0.0_closed_qa_prob_1.0/ropes_compact
+  - self_gen/google/gemma-4-E2B-it_temp_0.0_closed_qa_prob_1.0/drop_compact
+
+val_ds_names:
+  - squad
+  - pwc
+  - drop
+  - ropes
+  - self_gen/google/gemma-4-E2B-it_temp_0.0_closed_qa_prob_0.0/fw_qa_v2/min_0_to_2000/train/*level_0_val*.parquet
