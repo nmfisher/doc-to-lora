@@ -50,7 +50,6 @@ from ctx_to_lora.modeling.lora_layer import (
 from ctx_to_lora.modeling.lora_merger import combine_lora
 from ctx_to_lora.utils import (
     get_layers,
-    get_num_layers,
     get_peft_in_out_features,
     get_peft_modules,
     select_majority_dim_group,
@@ -563,8 +562,10 @@ class ModulatedPretrainedModel(nn.Module):
         ctx_model_name = self.ctx_encoder_args.ctx_encoder_model_name_or_path
         if ctx_model_name is None:
             ctx_model_name = self.base_model.config.name_or_path
-        # use an explicit copy of the base model
-        # for using with "modules_to_save"
+        # Load a separate encoder copy (modules_to_save semantics). Note: we don't
+        # pass peft_config here, so for Gemma 4 the encoder takes the bare-model
+        # path in get_model and lands as a Gemma4TextModel — same shape the
+        # CTX_ENCODER_CLS classes expect (operates on .layers / .config directly).
         base_model_attn_impl = self.base_model.config._attn_implementation
         logger.debug(f"ctx_model_name: {ctx_model_name}")
         logger.debug(f"base_model.config._attn_implementation: {base_model_attn_impl}")

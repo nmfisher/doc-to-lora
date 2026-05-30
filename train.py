@@ -173,8 +173,13 @@ def main():
                 ctx_encoder_model_config = ctx_encoder_model_config.text_config
             ctx_tokenizer = get_tokenizer(ctx_name, train=True)
         else:
-            ctx_name = base_model.base_model.config.name_or_path
-            ctx_encoder_model_config = base_model.config
+            # When no ctx_encoder_model_name_or_path is given, reuse the base model
+            # as the encoder. PeftModel chains expose the bare model at
+            # `.base_model`; non-PEFT (Gemma 4) bare models don't have that, so
+            # fall through to the model itself.
+            bare = getattr(base_model, "base_model", base_model)
+            ctx_name = bare.config.name_or_path
+            ctx_encoder_model_config = bare.config
             ctx_tokenizer = tokenizer
 
     if ctx_args.exp_setup == ExperimentSetup.HYPERLORA:
