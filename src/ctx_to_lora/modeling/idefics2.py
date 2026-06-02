@@ -19,7 +19,6 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 from torch.nn.attention import SDPBackend, sdpa_kernel
-from torch.utils.checkpoint import checkpoint
 from transformers.activations import ACT2FN
 from transformers.cache_utils import Cache
 from transformers.configuration_utils import PretrainedConfig
@@ -426,65 +425,95 @@ class Idefics2PerceiverFlashAttention2(Idefics2PerceiverAttention):
 
         # Replace flash-attn with SDPA EFFICIENT_ATTENTION. flash-attn's
         # backward emitted NaN through this perceiver layer (anomaly
-        # detection localized it to FlashAttnVarlenFuncBackward dk), and
-        # Gemma 4's own attention always upcasts softmax to fp32 for
-        # stability (eager_attention_forward in transformers gemma4
-        # modeling.py: `softmax(..., dtype=torch.float32)`).
+        # detection localized it to FlashAttnVarlenFuncBackward dk).
         # EFFICIENT_ATTENTION uses an online softmax with fp32 accumulators
-        # internally — same trick, applied to the perceiver. We keep q/k/v
-        # in bf16 to match flash's memory profile; the fp32 happens only
-        # inside the kernel.
+        # internally — same stability trick as Gemma 4's own attention
+        # (eager_attention_forward in transformers gemma4 modeling.py:
+        # `softmax(..., dtype=torch.float32)`).
         #
-        # Shapes:
+        # Layout for the packed multi-segment case (per_layer_activations
+        # ctx encoder, which rearranges N encoder-layer hidden states into
+        # a single (1, N*seq_len, hidden) context):
         #   query_states: (bsz_q, q_len=n_latents, n_heads, head_dim)
-        #   key_states/value_states: (bsz_k, n_heads, kv_len, head_dim)
-        #     (after the transpose at line 387-392 + repeat_kv).
-        #   SDPA wants (bsz, n_heads, seq, head_dim) for all three.
+        #   key_states/value_states: (bsz_k=1, n_heads, kv_len=N*seq_len,
+        #     head_dim) — already transposed + repeat_kv'd above
+        #
+        # Instead of expand'ing K, V across bsz_q (which materializes
+        # bsz_q copies of the long K/V — that's where the 14.96 GiB OOM
+        # came from), we *flatten Q* into the kv-len dimension and use a
+        # block-diagonal additive mask so segment-i Q tokens can only
+        # attend to segment-i K positions. K/V stay at batch=1.
         q = query_states.transpose(1, 2)  # -> (bsz_q, n_heads, q_len, head_dim)
-        k_sdpa = key_states  # already (bsz_k, n_heads, kv_len, head_dim)
+        k_sdpa = key_states  # (bsz_k, n_heads, kv_len, head_dim)
         v_sdpa = value_states
 
         bsz_q = q.shape[0]
         bsz_k = k_sdpa.shape[0]
+        n_heads = q.shape[1]
+        head_dim = q.shape[3]
         kv_len = k_sdpa.shape[2]
 
-        if bsz_q != bsz_k:
-            # After unpad_input in the resampler, K/V have batch=1 (packed
-            # context) while Q keeps the original per-segment batch.
-            # `expand` is a view — no memory cost.
-            k_sdpa = k_sdpa.expand(bsz_q, -1, -1, -1)
-            v_sdpa = v_sdpa.expand(bsz_q, -1, -1, -1)
-
-        # Block-diagonal additive mask for packed sequences: Q batch i
-        # attends only to K positions in segment i (cu_seq_lens_k slice).
-        # For bsz_q == 1 we skip — full attention over K.
-        attn_mask_4d = None
         cu_seq_lens_k = kwargs.get("cu_seq_lens_k", None)
-        if cu_seq_lens_k is not None and bsz_q > 1:
-            cu = cu_seq_lens_k.tolist()
-            if len(cu) >= bsz_q + 1:
-                attn_mask_4d = torch.full(
-                    (bsz_q, 1, q_len, kv_len),
-                    float("-inf"),
-                    device=q.device,
-                    dtype=q.dtype,
-                )
-                for i in range(bsz_q):
-                    attn_mask_4d[i, 0, :, cu[i] : cu[i + 1]] = 0.0
+        is_packed = (
+            bsz_q > bsz_k
+            and cu_seq_lens_k is not None
+            and len(cu_seq_lens_k) >= bsz_q + 1
+        )
 
-        # Prefer EFFICIENT_ATTENTION (xformers-style, online softmax with
-        # fp32 accumulators); fall back to MATH if the mask shape isn't
-        # accepted. FLASH backend is excluded — that's the path we're
-        # replacing.
-        with sdpa_kernel([SDPBackend.EFFICIENT_ATTENTION, SDPBackend.MATH]):
-            attn_output = F.scaled_dot_product_attention(
-                q,
-                k_sdpa,
-                v_sdpa,
-                attn_mask=attn_mask_4d,
-                dropout_p=dropout_rate,
-                is_causal=False,  # perceiver cross-attention is bidirectional
+        if is_packed:
+            # Q: (bsz_q, n_heads, q_len, head_dim) -> (1, n_heads, bsz_q*q_len, head_dim)
+            # The reshape order is segment-major: positions [i*q_len, (i+1)*q_len)
+            # belong to segment i.
+            q_flat = (
+                q.transpose(0, 1)
+                .reshape(n_heads, bsz_q * q_len, head_dim)
+                .unsqueeze(0)
             )
+
+            # Block-diagonal additive mask: Q position p attends to K position j
+            # iff p // q_len == segment(j). Shape (1, 1, bsz_q*q_len, kv_len);
+            # only ~bsz_q * q_len * (kv_len / bsz_q) = q_len * kv_len entries
+            # are 0 (allowed), the rest are -inf.
+            cu = cu_seq_lens_k.tolist()
+            attn_mask_4d = torch.full(
+                (1, 1, bsz_q * q_len, kv_len),
+                float("-inf"),
+                device=q.device,
+                dtype=q.dtype,
+            )
+            for i in range(bsz_q):
+                attn_mask_4d[
+                    0, 0, i * q_len : (i + 1) * q_len, cu[i] : cu[i + 1]
+                ] = 0.0
+
+            with sdpa_kernel([SDPBackend.EFFICIENT_ATTENTION, SDPBackend.MATH]):
+                attn_flat = F.scaled_dot_product_attention(
+                    q_flat,
+                    k_sdpa,
+                    v_sdpa,
+                    attn_mask=attn_mask_4d,
+                    dropout_p=dropout_rate,
+                    is_causal=False,
+                )
+
+            # (1, n_heads, bsz_q*q_len, head_dim) -> (bsz_q, n_heads, q_len, head_dim)
+            attn_output = (
+                attn_flat.squeeze(0)
+                .reshape(n_heads, bsz_q, q_len, head_dim)
+                .transpose(0, 1)
+            )
+        else:
+            # Non-packed: bsz matches (e.g. smoke test with bsz_q == bsz_k == 1).
+            # Straightforward SDPA over the full K, V.
+            with sdpa_kernel([SDPBackend.EFFICIENT_ATTENTION, SDPBackend.MATH]):
+                attn_output = F.scaled_dot_product_attention(
+                    q,
+                    k_sdpa,
+                    v_sdpa,
+                    attn_mask=None,
+                    dropout_p=dropout_rate,
+                    is_causal=False,
+                )
 
         # (bsz_q, n_heads, q_len, head_dim) -> (bsz_q, q_len, n_heads*head_dim)
         attn_output = attn_output.transpose(1, 2).contiguous()
@@ -758,13 +787,6 @@ class Idefics2PerceiverResampler(Idefics2PreTrainedModel):
             max_length_q=max_length_q,
             max_length_k=max_length_q,
         )
-        # Gradient checkpointing on each perceiver layer. With SDPA replacing
-        # flash, the per-layer activations (especially the expand'd K/V and
-        # the layernormed context) compound across num_blocks layers and OOM
-        # the A100-80GB during backward. Checkpointing recomputes the layer's
-        # forward during backward instead of saving its activations — ~30%
-        # more compute, but per-block memory drops to ~constant. Only used
-        # in training mode; inference reuses activations as before.
         for i, layer in enumerate(self.layers):
             inp_kwargs = dict(
                 latents=compressed_context,
@@ -778,14 +800,7 @@ class Idefics2PerceiverResampler(Idefics2PreTrainedModel):
             else:
                 attn_kwargs = {**inp_kwargs, **self_attn_kwargs}
 
-            if self.training:
-                # checkpoint() doesn't pass kwargs; wrap in a closure.
-                def _layer_fwd(*args, _layer=layer, _kw=attn_kwargs):
-                    return _layer(**_kw)
-
-                layer_outputs = checkpoint(_layer_fwd, use_reentrant=False)
-            else:
-                layer_outputs = layer(**attn_kwargs)
+            layer_outputs = layer(**attn_kwargs)
             compressed_context = layer_outputs[0]
 
         compressed_context = self.layernorm(compressed_context)
