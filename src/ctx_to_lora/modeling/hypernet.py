@@ -826,12 +826,13 @@ class ModulatedPretrainedModel(nn.Module):
         ):
             from transformers.modeling_outputs import CausalLMOutputWithPast
 
-            # Cast logits to fp32: CE over 262K Gemma 4 classes is unstable
-            # in bf16 (softmax overflow → NaN grads). The loss layer takes
-            # fp32 anyway, so this is the standard upcast.
-            logits = self.base_model.lm_head(
-                model_outputs.last_hidden_state
-            ).float()
+            # Keep logits in the input dtype (bf16). F.cross_entropy upcasts
+            # softmax to fp32 internally, so the manual .float() cast we used
+            # to do was redundant — and at 262K vocab × 2048 packed seq, the
+            # fp32 logits tensor is ~2 GB; the saved tensor for backward
+            # doubled that. With the perceiver SDPA fp32 fix in place, the
+            # numerical concern is handled there.
+            logits = self.base_model.lm_head(model_outputs.last_hidden_state)
             model_outputs = CausalLMOutputWithPast(
                 loss=None,
                 logits=logits,
