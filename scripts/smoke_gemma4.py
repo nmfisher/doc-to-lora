@@ -120,6 +120,9 @@ with torch.no_grad():
         ctx_ids=ctx_ids,
         ctx_attn_mask=ctx_attn,
         ctx_position_ids=ctx_pos,
+        # combine_lora needs n_ctx_chunks; for our single-context smoke
+        # it's just [1].
+        n_ctx_chunks=torch.tensor([1], device=device, dtype=torch.int32),
         input_ids=qa_ids,
         attention_mask=torch.ones_like(qa_ids),
         position_ids=torch.arange(qa_ids.shape[-1], device=device).unsqueeze(0),
