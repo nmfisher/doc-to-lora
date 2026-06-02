@@ -448,7 +448,7 @@ class Idefics2PerceiverFlashAttention2(Idefics2PerceiverAttention):
 
 
 IDEFICS2_PERCEIVER_ATTENTION_CLASSES = {
-    # "eager": Idefics2PerceiverAttention,
+    "eager": Idefics2PerceiverAttention,
     "flash_attention_2": Idefics2PerceiverFlashAttention2,
 }
 
