@@ -188,16 +188,31 @@ def check2_wiring(model: ModulatedPretrainedModel, tokenizer) -> None:
         return_dict=True,
     ).to("cuda")
 
+    def forward_logits(input_ids):
+        # Gemma4TextModel returns last_hidden_state, not logits. Project
+        # through the stashed lm_head (model_loading.py wires this on for us).
+        out = model.base_model(input_ids=input_ids)
+        if hasattr(out, "logits") and out.logits is not None:
+            return out.logits.clone()
+        if hasattr(model.base_model, "lm_head"):
+            return model.base_model.lm_head(out.last_hidden_state).clone()
+        # Last resort: try the saved full-wrapper path
+        full = getattr(model.base_model, "generate", None)
+        if full is not None and hasattr(full, "__self__"):
+            wrapper = full.__self__
+            return wrapper.lm_head(out.last_hidden_state).clone()
+        raise RuntimeError("Couldn't project hidden_state to logits.")
+
     model.reset()
     with torch.no_grad():
-        logits_base = model.base_model(input_ids=chat["input_ids"]).logits.clone()
+        logits_base = forward_logits(chat["input_ids"])
 
     # Restore ctx encoder's name_or_path (cleared by PerLayerActivations slicing)
     if not getattr(model.ctx_encoder.base_model, "name_or_path", ""):
         model.ctx_encoder.base_model.name_or_path = MODEL
     model.internalize(DEBUG_CONTEXT)
     with torch.no_grad():
-        logits_lora = model.base_model(input_ids=chat["input_ids"]).logits.clone()
+        logits_lora = forward_logits(chat["input_ids"])
     model.reset()
 
     abs_diff = (logits_lora - logits_base).abs()
