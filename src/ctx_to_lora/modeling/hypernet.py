@@ -798,6 +798,17 @@ class ModulatedPretrainedModel(nn.Module):
                 position_ids,
             )
         model_outputs = self.base_model(*model_inputs_args, **model_inputs_kwargs)
+        # Bare Gemma4TextModel returns last_hidden_state, not logits. The trainer
+        # reads outputs.logits, so project last_hidden_state through the stashed
+        # lm_head (set in model_loading.py's Gemma 4 branch).
+        if (
+            getattr(model_outputs, "logits", None) is None
+            and getattr(model_outputs, "last_hidden_state", None) is not None
+            and hasattr(self.base_model, "lm_head")
+        ):
+            model_outputs.logits = self.base_model.lm_head(
+                model_outputs.last_hidden_state
+            )
 
         if return_generated_lora:
             return model_outputs, (generated_loras, generated_layernorms)

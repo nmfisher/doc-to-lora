@@ -193,6 +193,12 @@ def get_model(
         # forever. To recover the wrapper later (e.g., for pad_token_id
         # propagation), inspect model.generate.__self__.
         model.generate = full_model.generate
+        # Same story for lm_head: the bare text model returns last_hidden_state,
+        # but the trainer wants outputs.logits = lm_head(last_hidden_state).
+        # Stash a reference on the bare model so ModulatedPretrainedModel.forward
+        # can project. lm_head is a Linear; registering it as a child of the
+        # bare model doesn't create a cycle (it's a leaf module).
+        model.lm_head = full_model.lm_head
     else:
         model = Gemma3ForConditionalGeneration.from_pretrained(**model_init_kwargs)
         model = model.language_model
