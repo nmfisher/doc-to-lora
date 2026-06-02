@@ -16,6 +16,7 @@
 import math
 
 import torch
+import torch.nn.functional as F
 from torch import nn
 from transformers.activations import ACT2FN
 from transformers.cache_utils import Cache
@@ -421,27 +422,65 @@ class Idefics2PerceiverFlashAttention2(Idefics2PerceiverAttention):
             key_states = key_states.to(target_dtype)
             value_states = value_states.to(target_dtype)
 
-        # Reashape to the expected shape for Flash Attention
-        key_states = key_states.transpose(1, 2)
-        value_states = value_states.transpose(1, 2)
+        # Replace the flash-attn call with SDPA in fp32. Rationale: flash-attn
+        # backward in bf16 was emitting NaN (anomaly detection localized it to
+        # FlashAttnVarlenFuncBackward), and Gemma 4's own attention always
+        # upcasts softmax to fp32 (see transformers Gemma4TextAttention and
+        # eager_attention_forward, line 847: `softmax(..., dtype=torch.float32)`).
+        # We mirror that here. SDPA's math-kernel path also tends to use fp32
+        # accumulators internally, so it's the principled fix for the perceiver
+        # too.
+        #
+        # Shape conventions:
+        #   query_states: (bsz, q_len, n_heads, head_dim)
+        #   key_states, value_states: (bsz, n_heads, kv_len, head_dim) at this
+        #     point — they were transpose(1,2)'d earlier.
+        #   SDPA wants (bsz, n_heads, seq, head_dim) for all three.
+        q = query_states.transpose(1, 2).float()  # -> (bsz_q, n_heads, q_len, head_dim)
+        k_sdpa = key_states.float()  # already (bsz_k, n_heads, kv_len, head_dim)
+        v_sdpa = value_states.float()
 
-        attn_output = _flash_attention_forward(
-            query_states,
-            key_states,
-            value_states,
-            attention_mask,
-            q_len,
-            dropout=dropout_rate,
-            position_ids=position_ids,
-            sliding_window=None,
-            is_causal=self.is_causal,
-            use_top_left_mask=self._flash_attn_uses_top_left_mask,
-            **kwargs,
+        bsz_q = q.shape[0]
+        bsz_k = k_sdpa.shape[0]
+        kv_len = k_sdpa.shape[2]
+
+        if bsz_q != bsz_k:
+            # After unpad_input in the resampler, K/V have batch=1 (packed
+            # context) while Q keeps the original per-segment batch. Broadcast
+            # K/V across Q's batch dim — `expand` doesn't copy memory.
+            k_sdpa = k_sdpa.expand(bsz_q, -1, -1, -1)
+            v_sdpa = v_sdpa.expand(bsz_q, -1, -1, -1)
+
+        # Build a per-segment block-diagonal additive mask when the resampler
+        # passed cu_seq_lens for packed sequences. Q's batch i should only
+        # attend to K positions in segment i (the i-th cu_seqlens slice).
+        # For bsz_q == 1 we skip this — full attention over K.
+        attn_mask_4d = None
+        cu_seq_lens_k = kwargs.get("cu_seq_lens_k", None)
+        if cu_seq_lens_k is not None and bsz_q > 1:
+            cu = cu_seq_lens_k.tolist()
+            if len(cu) >= bsz_q + 1:
+                attn_mask_4d = torch.full(
+                    (bsz_q, 1, q_len, kv_len),
+                    float("-inf"),
+                    device=q.device,
+                    dtype=q.dtype,
+                )
+                for i in range(bsz_q):
+                    attn_mask_4d[i, 0, :, cu[i] : cu[i + 1]] = 0.0
+
+        attn_output = F.scaled_dot_product_attention(
+            q,
+            k_sdpa,
+            v_sdpa,
+            attn_mask=attn_mask_4d,
+            dropout_p=dropout_rate,
+            is_causal=False,  # perceiver cross-attention is bidirectional
         )
 
-        attn_output = attn_output.reshape(
-            bsz, q_len, self.num_heads * self.head_dim
-        ).contiguous()
+        # (bsz_q, n_heads, q_len, head_dim) -> (bsz_q, q_len, n_heads*head_dim)
+        attn_output = attn_output.transpose(1, 2).contiguous().to(input_dtype)
+        attn_output = attn_output.reshape(bsz, q_len, self.num_heads * self.head_dim)
         attn_output = self.o_proj(attn_output)
 
         if not output_attentions:

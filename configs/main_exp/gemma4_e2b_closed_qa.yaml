@@ -31,10 +31,12 @@ use_kl_loss: false
 
 ctx_encoder_type: per_layer_activations
 n_latent_queries: 8
-# Was 9; FlashAttnVarlenFuncBackward NaN'd through the depth on Gemma 4 +
-# bf16 (anomaly detection localized it). Single block for now — restore
-# once the perceiver gets a SDPA path / stability fix.
-num_blocks: 1
+# Restored to 9 after replacing the perceiver's flash-attn path with
+# SDPA-in-fp32 (idefics2.py Idefics2PerceiverFlashAttention2.forward).
+# That mirrors Gemma 4's own stability pattern — its eager_attention_forward
+# always upcasts softmax to fp32. If NaN comes back at depth, the next
+# move is per-block layernorm/scaling rather than dropping depth.
+num_blocks: 9
 num_self_attn_per_block: 0
 
 # Tuning for the Gemma 4 hypernet (~750M trainable params with
