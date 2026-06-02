@@ -254,79 +254,58 @@ def check3_generated_lora_magnitudes(model: ModulatedPretrainedModel) -> None:
         model.reset()
         return
 
-    # generated_loras is a list/dict of (A, B) per layer-and-module.
-    # Print summary per layer.
-    def stats(t):
-        t = t.detach()
-        return (t.abs().mean().item(), t.abs().max().item(), t.shape)
+    def walk(obj, path):
+        if isinstance(obj, dict):
+            for k, v in obj.items():
+                walk(v, f"{path}.{k}")
+        elif isinstance(obj, (list, tuple)):
+            for i, v in enumerate(obj):
+                walk(v, f"{path}[{i}]")
+        elif hasattr(obj, "shape"):
+            t = obj.detach()
+            print(f"  {path:<40}  shape={tuple(t.shape)!s:<22}  |mean|={t.abs().mean().item():.4e}  |max|={t.abs().max().item():.4e}")
+        else:
+            print(f"  {path:<40}  type={type(obj).__name__}")
 
     print(f"type(generated_loras): {type(loras).__name__}")
-    if isinstance(loras, dict):
-        for k, v in list(loras.items())[:10]:
-            if hasattr(v, "shape"):
-                m, mx, sh = stats(v)
-                print(f"  {k}: shape={sh}  |mean|={m:.4e}  |max|={mx:.4e}")
-            else:
-                print(f"  {k}: type={type(v).__name__}  (not a tensor)")
-    elif isinstance(loras, (list, tuple)):
-        for i, item in enumerate(loras[:5]):
-            print(f"  loras[{i}]: type={type(item).__name__}")
-            if isinstance(item, (list, tuple)):
-                for j, sub in enumerate(item):
-                    if hasattr(sub, "shape"):
-                        m, mx, sh = stats(sub)
-                        print(f"    [{j}]: shape={sh}  |mean|={m:.4e}  |max|={mx:.4e}")
-            elif hasattr(item, "shape"):
-                m, mx, sh = stats(item)
-                print(f"    shape={sh}  |mean|={m:.4e}  |max|={mx:.4e}")
-            elif isinstance(item, dict):
-                for k, v in list(item.items())[:3]:
-                    if hasattr(v, "shape"):
-                        m, mx, sh = stats(v)
-                        print(f"    {k}: shape={sh}  |mean|={m:.4e}  |max|={mx:.4e}")
-    else:
-        print(f"  unexpected type: {type(loras)}")
+    walk(loras, "loras")
     model.reset()
 
 
 def check4_base_ce_on_training_sample(model: ModulatedPretrainedModel, tokenizer) -> None:
     section("[4] CE loss of base model on a training sample (no LoRA)")
-    # Pull the first row from the prepared training parquet (after packing
-    # was run earlier — we re-tokenize a raw QA pair from queries.jsonl
-    # to avoid depending on prepared dataset state).
-    queries_path = Path("data/raw_datasets/cocoon_code_qa/queries.jsonl")
-    if not queries_path.exists():
-        # Fall back to whatever raw queries we can find on the volume.
-        candidates = list(Path("data/raw_datasets").rglob("queries.jsonl"))
-        if candidates:
-            queries_path = candidates[0]
-    if not queries_path.exists():
-        print("queries.jsonl not found anywhere under data/raw_datasets/. Skipping.")
+    # The volume ships ds.parquet, not raw queries.jsonl. Use it.
+    candidates = list(Path("data/raw_datasets").rglob("ds.parquet"))
+    if not candidates:
+        print("No ds.parquet found under data/raw_datasets/. Skipping.")
         return
+    parquet_path = candidates[0]
+    print(f"reading {parquet_path}")
 
-    import json
-    rec = None
-    with queries_path.open() as f:
-        rec = json.loads(f.readline())
-    if rec is None:
-        print("queries.jsonl is empty.")
+    try:
+        import pyarrow.parquet as pq
+    except ImportError:
+        print("pyarrow not installed in this container; skipping.")
         return
+    table = pq.read_table(str(parquet_path))
+    print(f"parquet columns: {table.column_names}")
+    print(f"parquet rows: {table.num_rows}")
 
-    # cocoon's schema: {context, question, answer} (verify against
-    # queries_to_parquet.py — the actual key names may differ).
-    context = rec.get("context") or rec.get("ctx") or rec.get("repo_text", "")
-    question = rec.get("question") or rec.get("query") or ""
-    answer = rec.get("answer") or rec.get("response") or ""
-    print(f"sample keys: {list(rec.keys())}")
-    print(f"context (first 200 chars): {str(context)[:200]!r}")
-    print(f"question (first 200 chars): {str(question)[:200]!r}")
-    print(f"answer (first 200 chars): {str(answer)[:200]!r}")
+    row = table.slice(0, 1).to_pylist()[0]
+    # cocoon_code_qa schema is {context, question, answer} (string columns)
+    context = row.get("context", "")
+    question = row.get("question", "")
+    answer = row.get("answer", "")
+    print(f"sample keys: {list(row.keys())}")
+    print(f"context (len {len(context)}, first 200): {context[:200]!r}")
+    print(f"question (first 200): {question[:200]!r}")
+    print(f"answer (first 200): {answer[:200]!r}")
 
     if not (question and answer):
         print("Couldn't pull question/answer from sample; skipping CE compute.")
         return
 
-    # Build a single training-style sequence: question prompt + answer tokens.
+    # Build a training-style sequence: question prompt + answer tokens.
     # Mask the prompt tokens from the loss.
     prompt = tokenizer.apply_chat_template(
         [{"role": "user", "content": str(question)}],
@@ -339,13 +318,32 @@ def check4_base_ce_on_training_sample(model: ModulatedPretrainedModel, tokenizer
     labels = enc["input_ids"].clone()
     labels[:, :prompt_len] = -100
 
+    # Gemma4TextModel doesn't accept labels — compute CE ourselves.
     model.reset()
     with torch.no_grad():
-        out = model.base_model(input_ids=enc["input_ids"], labels=labels)
-    print(f"base model CE on this sample (no LoRA): {out.loss.item():.4f}")
-    print("[verdict] If this is already ~2 or below, the base model can answer")
-    print("          without needing context-conditioned LoRA → no gradient")
-    print("          pressure on the hypernet → it stays at zero.")
+        out = model.base_model(input_ids=enc["input_ids"])
+        if hasattr(out, "logits") and out.logits is not None:
+            logits = out.logits
+        elif hasattr(model.base_model, "lm_head"):
+            logits = model.base_model.lm_head(out.last_hidden_state)
+        else:
+            print("Couldn't get logits; skipping CE compute.")
+            return
+        # Shift for next-token prediction
+        shift_logits = logits[..., :-1, :].contiguous()
+        shift_labels = labels[..., 1:].contiguous()
+        loss = torch.nn.functional.cross_entropy(
+            shift_logits.view(-1, shift_logits.size(-1)),
+            shift_labels.view(-1),
+            ignore_index=-100,
+        )
+    print(f"\nbase model CE on this sample (no LoRA): {loss.item():.4f}")
+    if loss.item() < 2.5:
+        print("[verdict] LOW CE — base model can answer this almost on its own.")
+        print("          Hypernet has weak gradient pressure to grow useful LoRA.")
+    else:
+        print("[verdict] HIGH CE — base model genuinely struggles.")
+        print("          A working hypernet should reduce this with context.")
 
 
 def main() -> None:
