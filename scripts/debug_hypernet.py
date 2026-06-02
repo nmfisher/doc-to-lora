@@ -188,31 +188,42 @@ def check2_wiring(model: ModulatedPretrainedModel, tokenizer) -> None:
         return_dict=True,
     ).to("cuda")
 
-    def forward_logits(input_ids):
-        # Gemma4TextModel returns last_hidden_state, not logits. Project
-        # through the stashed lm_head (model_loading.py wires this on for us).
-        out = model.base_model(input_ids=input_ids)
-        if hasattr(out, "logits") and out.logits is not None:
-            return out.logits.clone()
-        if hasattr(model.base_model, "lm_head"):
-            return model.base_model.lm_head(out.last_hidden_state).clone()
-        # Last resort: try the saved full-wrapper path
-        full = getattr(model.base_model, "generate", None)
-        if full is not None and hasattr(full, "__self__"):
-            wrapper = full.__self__
-            return wrapper.lm_head(out.last_hidden_state).clone()
-        raise RuntimeError("Couldn't project hidden_state to logits.")
+    def first_token_logits(use_lora: bool) -> torch.Tensor:
+        # We can't call base_model(...) directly:
+        # ModulatedPretrainedModel._init_model patches every target Linear
+        # to lora_forward, which expects A/B kwargs bound at generate-time
+        # via apply_lora_to_layers. Going through the modulated generate
+        # is the supported path that binds (or skips) A/B correctly.
+        # Generate exactly 1 token and grab its scores.
+        if use_lora:
+            if not getattr(model.ctx_encoder.base_model, "name_or_path", ""):
+                model.ctx_encoder.base_model.name_or_path = MODEL
+            model.internalize(DEBUG_CONTEXT)
+            out = model.generate(
+                input_ids=chat["input_ids"],
+                attention_mask=chat.get("attention_mask"),
+                max_new_tokens=1,
+                do_sample=False,
+                output_scores=True,
+                return_dict_in_generate=True,
+            )
+        else:
+            model.reset()
+            # base_model.generate with no patched forwards = plain Gemma 4
+            out = model.base_model.generate(
+                input_ids=chat["input_ids"],
+                attention_mask=chat.get("attention_mask"),
+                max_new_tokens=1,
+                do_sample=False,
+                output_scores=True,
+                return_dict_in_generate=True,
+            )
+        # scores is a tuple of length max_new_tokens, each (1, vocab)
+        return out.scores[0].clone()
 
-    model.reset()
     with torch.no_grad():
-        logits_base = forward_logits(chat["input_ids"])
-
-    # Restore ctx encoder's name_or_path (cleared by PerLayerActivations slicing)
-    if not getattr(model.ctx_encoder.base_model, "name_or_path", ""):
-        model.ctx_encoder.base_model.name_or_path = MODEL
-    model.internalize(DEBUG_CONTEXT)
-    with torch.no_grad():
-        logits_lora = forward_logits(chat["input_ids"])
+        logits_base = first_token_logits(use_lora=False)
+        logits_lora = first_token_logits(use_lora=True)
     model.reset()
 
     abs_diff = (logits_lora - logits_base).abs()
