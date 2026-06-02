@@ -423,23 +423,27 @@ class Idefics2PerceiverFlashAttention2(Idefics2PerceiverAttention):
             key_states = key_states.to(target_dtype)
             value_states = value_states.to(target_dtype)
 
-        # Replace the flash-attn call with SDPA in fp32. Rationale: flash-attn
-        # backward in bf16 was emitting NaN (anomaly detection localized it to
-        # FlashAttnVarlenFuncBackward), and Gemma 4's own attention always
-        # upcasts softmax to fp32 (see transformers Gemma4TextAttention and
-        # eager_attention_forward, line 847: `softmax(..., dtype=torch.float32)`).
-        # We mirror that here. SDPA's math-kernel path also tends to use fp32
-        # accumulators internally, so it's the principled fix for the perceiver
-        # too.
+        # Replace the flash-attn call with SDPA forced to the EFFICIENT_ATTENTION
+        # backend. Rationale: flash-attn backward in bf16 was emitting NaN
+        # (anomaly detection localized to FlashAttnVarlenFuncBackward), and
+        # Gemma 4's own attention always upcasts the softmax to fp32 for
+        # stability (transformers' eager_attention_forward at line 847:
+        # `softmax(..., dtype=torch.float32)`).
+        #
+        # EFFICIENT_ATTENTION uses an online softmax with fp32 accumulators
+        # *internally*, so we can keep q/k/v in bf16 (matching flash's memory
+        # profile) and still get fp32 stability through the softmax. Upcasting
+        # q/k/v to fp32 here triples the perceiver activation memory and OOMs
+        # before we get to the fix.
         #
         # Shape conventions:
         #   query_states: (bsz, q_len, n_heads, head_dim)
         #   key_states, value_states: (bsz, n_heads, kv_len, head_dim) at this
         #     point — they were transpose(1,2)'d earlier.
         #   SDPA wants (bsz, n_heads, seq, head_dim) for all three.
-        q = query_states.transpose(1, 2).float()  # -> (bsz_q, n_heads, q_len, head_dim)
-        k_sdpa = key_states.float()  # already (bsz_k, n_heads, kv_len, head_dim)
-        v_sdpa = value_states.float()
+        q = query_states.transpose(1, 2)  # -> (bsz_q, n_heads, q_len, head_dim)
+        k_sdpa = key_states  # already (bsz_k, n_heads, kv_len, head_dim)
+        v_sdpa = value_states
 
         bsz_q = q.shape[0]
         bsz_k = k_sdpa.shape[0]
@@ -486,7 +490,7 @@ class Idefics2PerceiverFlashAttention2(Idefics2PerceiverAttention):
             )
 
         # (bsz_q, n_heads, q_len, head_dim) -> (bsz_q, q_len, n_heads*head_dim)
-        attn_output = attn_output.transpose(1, 2).contiguous().to(input_dtype)
+        attn_output = attn_output.transpose(1, 2).contiguous()
         attn_output = attn_output.reshape(bsz, q_len, self.num_heads * self.head_dim)
         attn_output = self.o_proj(attn_output)
 
