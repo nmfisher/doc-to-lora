@@ -655,7 +655,13 @@ class Idefics2PerceiverResampler(Idefics2PreTrainedModel):
                 context, attention_mask
             )
             context = context.unsqueeze(0)
-            position_ids = True  # goes down flash attn path that uses cu_seq_lens
+            # transformers 5.x: pass position_ids=None and the
+            # cu_seq_lens_q/cu_seq_lens_k kwargs together — that combination
+            # triggers the padding-free flash path (is_fa_with_varlen_kwargs)
+            # without trying to introspect position_ids.shape. The old code
+            # used `position_ids = True` as a sentinel; that crashed
+            # _is_packed_sequence on .shape access.
+            position_ids = None
 
         elif position_ids is not None:
             logger.warning_once("Using position ids for resampler")
