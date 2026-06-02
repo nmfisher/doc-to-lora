@@ -85,7 +85,10 @@ if hasattr(ctx_cfg, "text_config"):
 hypernet_config = get_hypernet_config(
     base_model,
     ctx_cfg,
-    HypernetArguments(),
+    # Match the production launch flags. per_rank_gen=False (the dataclass
+    # default) tells the aggregator to squeeze the r dim, but the hypernet
+    # head's Mix(...) pattern still has r — einsum mismatch at forward time.
+    HypernetArguments(per_rank_gen=True, per_layer_processing=True),
     AggregatorArguments(),
     ctx_encoder_args,
     peft_config=peft_config,
