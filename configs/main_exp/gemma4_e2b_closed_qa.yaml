@@ -37,6 +37,18 @@ n_latent_queries: 8
 num_blocks: 1
 num_self_attn_per_block: 0
 
+# Tuning for the Gemma 4 hypernet (~750M trainable params with
+# n_layers=16, n_modules=5, d_lora=13824, d_latent=512):
+#   - max_grad_norm: total L2 norm across all params naturally runs
+#     ~3e6 at step 1 (sqrt(750M) * avg per-param grad ~110). HF's
+#     default of 1.0 kills the gradient (scale factor 3.4e-7 → no
+#     learning). 1e5 keeps ~3% of the signal — clips the tail
+#     without flattening.
+#   - learning_rate: with the clip ratio above, 1e-4 gives an
+#     effective per-param update around 3-4e-4 per step. Bump up
+#     once you confirm loss curves are healthy.
+max_grad_norm: 1.0e5
+learning_rate: 1.0e-4
 gradient_accumulation_steps: 11
 # Cocoon's 64K-char repo windows are ~16-20K tokens; max_packed_ctx_len
 # of 32K OOM'd the A100-80GB at training time, so back off to 16K. Items
