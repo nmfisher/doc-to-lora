@@ -491,6 +491,11 @@ class ModulatedPretrainedModel(nn.Module):
         self.model_accepts_loss_kwargs = True
         self.generated_loras = None
 
+        # When True, state_dict() includes the non-tensor metadata fields.
+        # Flip on around explicit save/load calls; leave off so the trainer's
+        # default state_dict iteration only sees tensor values.
+        self._include_state_metadata = False
+
         self.register_module("base_model", base_model)
         self._init_model()
         self._bias_hyper_init()
@@ -626,9 +631,15 @@ class ModulatedPretrainedModel(nn.Module):
             raise ValueError("base model contains trainable parameters")
 
         state_dict = self.hypernet.state_dict(*args, **kwargs)
-        state_dict["base_model_name_or_path"] = self.base_model.name_or_path
-        state_dict["hypernet_config"] = self.hypernet_config
-        state_dict["ctx_encoder_args"] = self.ctx_encoder_args
+        # Non-tensor metadata gets stuffed in *only* when the caller asks for
+        # it via include_metadata=True (our own from_state_dict / explicit
+        # save_to_disk paths). transformers 5.9's _run_epoch iterates the
+        # state_dict and ValueErrors on non-Tensor values, so the trainer's
+        # default state_dict() call returns tensor-only.
+        if kwargs.pop("include_metadata", False) or self._include_state_metadata:
+            state_dict["base_model_name_or_path"] = self.base_model.name_or_path
+            state_dict["hypernet_config"] = self.hypernet_config
+            state_dict["ctx_encoder_args"] = self.ctx_encoder_args
         return state_dict
 
     def load_state_dict(self, state_dict: dict, *args, **kwargs):
@@ -811,7 +822,12 @@ class ModulatedPretrainedModel(nn.Module):
         ):
             from transformers.modeling_outputs import CausalLMOutputWithPast
 
-            logits = self.base_model.lm_head(model_outputs.last_hidden_state)
+            # Cast logits to fp32: CE over 262K Gemma 4 classes is unstable
+            # in bf16 (softmax overflow → NaN grads). The loss layer takes
+            # fp32 anyway, so this is the standard upcast.
+            logits = self.base_model.lm_head(
+                model_outputs.last_hidden_state
+            ).float()
             model_outputs = CausalLMOutputWithPast(
                 loss=None,
                 logits=logits,
