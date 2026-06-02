@@ -196,6 +196,12 @@ def main() -> None:
     ).to("cuda")
 
     section("Step 4: baseline — base Gemma 4, no LoRA")
+    # ModulatedPretrainedModel._init_model patches every target Linear's
+    # forward to lora_forward, expecting A/B kwargs that get bound later
+    # by apply_lora_to_layers. For the baseline call we want the
+    # un-patched original forwards, so reset() first (restores
+    # forward = forward_orig per module).
+    model.reset()
     with torch.no_grad():
         baseline_out = model.base_model.generate(
             input_ids=chat_inputs["input_ids"],
