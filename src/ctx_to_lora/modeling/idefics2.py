@@ -666,23 +666,30 @@ class Idefics2PerceiverResampler(Idefics2PreTrainedModel):
         elif position_ids is not None:
             logger.warning_once("Using position ids for resampler")
 
-            position_ids = position_ids.flatten()
+            flat_position_ids = position_ids.flatten()
             indices = torch.arange(
-                position_ids.size(0), device=position_ids.device, dtype=torch.int32
+                flat_position_ids.size(0),
+                device=flat_position_ids.device,
+                dtype=torch.int32,
             )
             # [bsz + 1]
             cu_seq_lens_k = torch.cat(
                 (
-                    indices[position_ids == 0],
+                    indices[flat_position_ids == 0],
                     torch.tensor(
-                        position_ids.size(),
-                        device=position_ids.device,
+                        flat_position_ids.size(),
+                        device=flat_position_ids.device,
                         dtype=torch.int32,
                     ),
                 )
             )
 
-            max_length_k = position_ids.max() + 1
+            max_length_k = flat_position_ids.max() + 1
+            # Same reasoning as the attention_mask branch above: hand cu_seqlens
+            # to flash via kwargs and pass position_ids=None so transformers 5.x
+            # _is_packed_sequence skips the .shape[1] check that breaks on the
+            # flattened 1D tensor.
+            position_ids = None
 
         else:
             raise ValueError("either position_ids or attention_mask is required")
