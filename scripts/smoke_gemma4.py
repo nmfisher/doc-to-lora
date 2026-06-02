@@ -128,7 +128,14 @@ with torch.no_grad():
         position_ids=torch.arange(qa_ids.shape[-1], device=device).unsqueeze(0),
     )
 print(f"  forward returned: {type(out).__name__}")
-print(f"  logits shape:     {out.logits.shape}")
+# Bare Gemma4TextModel returns last_hidden_state; Gemma4ForCausalLM-style
+# returns logits. Either is fine — train.py drives the model through
+# self.base_model(...) and doesn't assume a specific output shape here.
+output_tensor = getattr(out, "logits", None)
+if output_tensor is None:
+    output_tensor = getattr(out, "last_hidden_state", None)
+field = "logits" if hasattr(out, "logits") else "last_hidden_state"
+print(f"  {field} shape:     {output_tensor.shape}")
 
 section("SMOKE OK")
 print("Phases 1-4 wiring verified. Next: generate self_gen data and run a few")
