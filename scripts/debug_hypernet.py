@@ -292,12 +292,15 @@ def check4_base_ce_on_training_sample(model: ModulatedPretrainedModel, tokenizer
     print(f"parquet rows: {table.num_rows}")
 
     row = table.slice(0, 1).to_pylist()[0]
-    # cocoon_code_qa schema is {context, question, answer} (string columns)
+    # cocoon_code_qa schema: context (str), prompts (list[str]), responses (list[str])
     context = row.get("context", "")
-    question = row.get("question", "")
-    answer = row.get("answer", "")
+    prompts = row.get("prompts") or []
+    responses = row.get("responses") or []
+    question = prompts[0] if prompts else ""
+    answer = responses[0] if responses else ""
     print(f"sample keys: {list(row.keys())}")
     print(f"context (len {len(context)}, first 200): {context[:200]!r}")
+    print(f"#prompts={len(prompts)}, #responses={len(responses)}")
     print(f"question (first 200): {question[:200]!r}")
     print(f"answer (first 200): {answer[:200]!r}")
 
