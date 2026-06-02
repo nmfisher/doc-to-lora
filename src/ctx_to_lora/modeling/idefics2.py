@@ -18,6 +18,7 @@ import math
 import torch
 import torch.nn.functional as F
 from torch import nn
+from torch.nn.attention import SDPBackend, sdpa_kernel
 from transformers.activations import ACT2FN
 from transformers.cache_utils import Cache
 from transformers.configuration_utils import PretrainedConfig
@@ -469,14 +470,20 @@ class Idefics2PerceiverFlashAttention2(Idefics2PerceiverAttention):
                 for i in range(bsz_q):
                     attn_mask_4d[i, 0, :, cu[i] : cu[i + 1]] = 0.0
 
-        attn_output = F.scaled_dot_product_attention(
-            q,
-            k_sdpa,
-            v_sdpa,
-            attn_mask=attn_mask_4d,
-            dropout_p=dropout_rate,
-            is_causal=False,  # perceiver cross-attention is bidirectional
-        )
+        # Force the EFFICIENT_ATTENTION backend (xformers-style online softmax).
+        # The default MATH backend materializes a full (bsz, n_heads, q_len, kv_len)
+        # attention matrix, which OOM'd at our depths/lengths. EFFICIENT_ATTENTION
+        # supports fp32 inputs (FLASH backend does not) and uses an online softmax
+        # so memory is O(q_len + kv_len) per head, not O(q_len * kv_len).
+        with sdpa_kernel([SDPBackend.EFFICIENT_ATTENTION, SDPBackend.MATH]):
+            attn_output = F.scaled_dot_product_attention(
+                q,
+                k_sdpa,
+                v_sdpa,
+                attn_mask=attn_mask_4d,
+                dropout_p=dropout_rate,
+                is_causal=False,  # perceiver cross-attention is bidirectional
+            )
 
         # (bsz_q, n_heads, q_len, head_dim) -> (bsz_q, q_len, n_heads*head_dim)
         attn_output = attn_output.transpose(1, 2).contiguous().to(input_dtype)
