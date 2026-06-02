@@ -647,16 +647,26 @@ class ModulatedPretrainedModel(nn.Module):
         return state_dict
 
     def load_state_dict(self, state_dict: dict, *args, **kwargs):
-        self.base_model_name_or_path = state_dict.pop("base_model_name_or_path")
-        self.hypernet_config = state_dict.pop("hypernet_config")
-        self.ctx_encoder_args = state_dict.pop("ctx_encoder_args")
-        if self.base_model_name_or_path != self.base_model.name_or_path:
-            raise ValueError(
-                f"Base model name or path mismatch. "
-                f"The base model given is: {self.base_model.name_or_path}, "
-                f"but the loaded name is: {self.base_model_name_or_path}"
-            )
-        self._init_model()
+        # state_dict() gates metadata behind _include_state_metadata so the
+        # trainer's default save produces tensor-only checkpoints. On resume
+        # the metadata keys won't be present — pop with defaults and only
+        # validate / re-init when they are.
+        meta_name = state_dict.pop("base_model_name_or_path", None)
+        meta_hcfg = state_dict.pop("hypernet_config", None)
+        meta_cargs = state_dict.pop("ctx_encoder_args", None)
+        if meta_name is not None:
+            self.base_model_name_or_path = meta_name
+            if self.hypernet_config is None and meta_hcfg is not None:
+                self.hypernet_config = meta_hcfg
+            if self.ctx_encoder_args is None and meta_cargs is not None:
+                self.ctx_encoder_args = meta_cargs
+            if self.base_model_name_or_path != self.base_model.name_or_path:
+                raise ValueError(
+                    f"Base model name or path mismatch. "
+                    f"The base model given is: {self.base_model.name_or_path}, "
+                    f"but the loaded name is: {self.base_model_name_or_path}"
+                )
+            self._init_model()
 
         def remove_compile_prefix(sd: dict[str, Tensor]) -> dict[str, Tensor]:
             COMPILED_PREFIX = "_orig_mod."
