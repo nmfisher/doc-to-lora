@@ -7,6 +7,12 @@ from functools import partial
 import numpy as np
 import torch
 import wandb
+
+# Debug knob: TORCH_ANOMALY_DETECT=1 turns on autograd anomaly detection so
+# the first NaN/inf in backward gets pinpointed to the offending op. Slow,
+# only flip on for one-shot debug runs.
+if os.environ.get("TORCH_ANOMALY_DETECT") == "1":
+    torch.autograd.set_detect_anomaly(True)
 from datasets import disable_caching
 from peft import PeftModel
 from transformers import (
