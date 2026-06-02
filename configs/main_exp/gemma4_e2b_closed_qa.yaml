@@ -36,7 +36,7 @@ n_latent_queries: 8
 # That mirrors Gemma 4's own stability pattern — its eager_attention_forward
 # always upcasts softmax to fp32. If NaN comes back at depth, the next
 # move is per-block layernorm/scaling rather than dropping depth.
-num_blocks: 9
+num_blocks: 1  # temp: testing whether SDPA fp32 fix works at this depth
 num_self_attn_per_block: 0
 
 # Tuning for the Gemma 4 hypernet (~750M trainable params with
