@@ -19,6 +19,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 from torch.nn.attention import SDPBackend, sdpa_kernel
+from torch.utils.checkpoint import checkpoint
 from transformers.activations import ACT2FN
 from transformers.cache_utils import Cache
 from transformers.configuration_utils import PretrainedConfig
@@ -423,23 +424,21 @@ class Idefics2PerceiverFlashAttention2(Idefics2PerceiverAttention):
             key_states = key_states.to(target_dtype)
             value_states = value_states.to(target_dtype)
 
-        # Replace the flash-attn call with SDPA forced to the EFFICIENT_ATTENTION
-        # backend. Rationale: flash-attn backward in bf16 was emitting NaN
-        # (anomaly detection localized to FlashAttnVarlenFuncBackward), and
-        # Gemma 4's own attention always upcasts the softmax to fp32 for
-        # stability (transformers' eager_attention_forward at line 847:
-        # `softmax(..., dtype=torch.float32)`).
-        #
+        # Replace flash-attn with SDPA EFFICIENT_ATTENTION. flash-attn's
+        # backward emitted NaN through this perceiver layer (anomaly
+        # detection localized it to FlashAttnVarlenFuncBackward dk), and
+        # Gemma 4's own attention always upcasts softmax to fp32 for
+        # stability (eager_attention_forward in transformers gemma4
+        # modeling.py: `softmax(..., dtype=torch.float32)`).
         # EFFICIENT_ATTENTION uses an online softmax with fp32 accumulators
-        # *internally*, so we can keep q/k/v in bf16 (matching flash's memory
-        # profile) and still get fp32 stability through the softmax. Upcasting
-        # q/k/v to fp32 here triples the perceiver activation memory and OOMs
-        # before we get to the fix.
+        # internally — same trick, applied to the perceiver. We keep q/k/v
+        # in bf16 to match flash's memory profile; the fp32 happens only
+        # inside the kernel.
         #
-        # Shape conventions:
-        #   query_states: (bsz, q_len, n_heads, head_dim)
-        #   key_states, value_states: (bsz, n_heads, kv_len, head_dim) at this
-        #     point — they were transpose(1,2)'d earlier.
+        # Shapes:
+        #   query_states: (bsz_q, q_len=n_latents, n_heads, head_dim)
+        #   key_states/value_states: (bsz_k, n_heads, kv_len, head_dim)
+        #     (after the transpose at line 387-392 + repeat_kv).
         #   SDPA wants (bsz, n_heads, seq, head_dim) for all three.
         q = query_states.transpose(1, 2)  # -> (bsz_q, n_heads, q_len, head_dim)
         k_sdpa = key_states  # already (bsz_k, n_heads, kv_len, head_dim)
@@ -451,15 +450,14 @@ class Idefics2PerceiverFlashAttention2(Idefics2PerceiverAttention):
 
         if bsz_q != bsz_k:
             # After unpad_input in the resampler, K/V have batch=1 (packed
-            # context) while Q keeps the original per-segment batch. Broadcast
-            # K/V across Q's batch dim — `expand` doesn't copy memory.
+            # context) while Q keeps the original per-segment batch.
+            # `expand` is a view — no memory cost.
             k_sdpa = k_sdpa.expand(bsz_q, -1, -1, -1)
             v_sdpa = v_sdpa.expand(bsz_q, -1, -1, -1)
 
-        # Build a per-segment block-diagonal additive mask when the resampler
-        # passed cu_seq_lens for packed sequences. Q's batch i should only
-        # attend to K positions in segment i (the i-th cu_seqlens slice).
-        # For bsz_q == 1 we skip this — full attention over K.
+        # Block-diagonal additive mask for packed sequences: Q batch i
+        # attends only to K positions in segment i (cu_seq_lens_k slice).
+        # For bsz_q == 1 we skip — full attention over K.
         attn_mask_4d = None
         cu_seq_lens_k = kwargs.get("cu_seq_lens_k", None)
         if cu_seq_lens_k is not None and bsz_q > 1:
@@ -474,11 +472,10 @@ class Idefics2PerceiverFlashAttention2(Idefics2PerceiverAttention):
                 for i in range(bsz_q):
                     attn_mask_4d[i, 0, :, cu[i] : cu[i + 1]] = 0.0
 
-        # Force the EFFICIENT_ATTENTION backend (xformers-style online softmax).
-        # The default MATH backend materializes a full (bsz, n_heads, q_len, kv_len)
-        # attention matrix, which OOM'd at our depths/lengths. EFFICIENT_ATTENTION
-        # supports fp32 inputs (FLASH backend does not) and uses an online softmax
-        # so memory is O(q_len + kv_len) per head, not O(q_len * kv_len).
+        # Prefer EFFICIENT_ATTENTION (xformers-style, online softmax with
+        # fp32 accumulators); fall back to MATH if the mask shape isn't
+        # accepted. FLASH backend is excluded — that's the path we're
+        # replacing.
         with sdpa_kernel([SDPBackend.EFFICIENT_ATTENTION, SDPBackend.MATH]):
             attn_output = F.scaled_dot_product_attention(
                 q,
@@ -761,6 +758,13 @@ class Idefics2PerceiverResampler(Idefics2PreTrainedModel):
             max_length_q=max_length_q,
             max_length_k=max_length_q,
         )
+        # Gradient checkpointing on each perceiver layer. With SDPA replacing
+        # flash, the per-layer activations (especially the expand'd K/V and
+        # the layernormed context) compound across num_blocks layers and OOM
+        # the A100-80GB during backward. Checkpointing recomputes the layer's
+        # forward during backward instead of saving its activations — ~30%
+        # more compute, but per-block memory drops to ~constant. Only used
+        # in training mode; inference reuses activations as before.
         for i, layer in enumerate(self.layers):
             inp_kwargs = dict(
                 latents=compressed_context,
@@ -774,7 +778,14 @@ class Idefics2PerceiverResampler(Idefics2PreTrainedModel):
             else:
                 attn_kwargs = {**inp_kwargs, **self_attn_kwargs}
 
-            layer_outputs = layer(**attn_kwargs)
+            if self.training:
+                # checkpoint() doesn't pass kwargs; wrap in a closure.
+                def _layer_fwd(*args, _layer=layer, _kw=attn_kwargs):
+                    return _layer(**_kw)
+
+                layer_outputs = checkpoint(_layer_fwd, use_reentrant=False)
+            else:
+                layer_outputs = layer(**attn_kwargs)
             compressed_context = layer_outputs[0]
 
         compressed_context = self.layernorm(compressed_context)
