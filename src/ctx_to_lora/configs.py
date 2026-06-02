@@ -317,6 +317,17 @@ class LoRAArguments:
         default=8,
         metadata={"help": ("LoRA R value.")},
     )
+    lora_alpha: float | None = field(
+        default=None,
+        metadata={
+            "help": (
+                "LoRA alpha (scaling factor). When None, get_lora_config uses "
+                "the SakanaAI default r**1.5 * 2 (≈45 for r=8). For Gemma 4 "
+                "training that default produced NaN grads at step 1 reduce; "
+                "pass --lora_alpha=8 (= r) or 16 for stability."
+            )
+        },
+    )
     lora_dropout: float | None = field(
         default=0.0,
         metadata={"help": ("LoRA dropout.")},

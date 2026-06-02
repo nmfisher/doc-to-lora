@@ -218,13 +218,20 @@ def get_lora_config(model_dir, **kwargs):
         logger.info("No target modules specified for LoRA.")
         return None
     r = kwargs.pop("lora_r", 8)
+    # Caller can pass lora_alpha=None to fall back to the legacy formula, or
+    # provide a number to override. The legacy r**1.5*2 (=45 at r=8) was
+    # NaN-prone on Gemma 4 + bf16 (combined with scaling=alpha used directly
+    # in lora_layer.py); see HypernetArguments.lora_alpha help.
+    lora_alpha = kwargs.pop("lora_alpha", None)
+    if lora_alpha is None:
+        lora_alpha = r ** (3 / 2) * 2
     peft_conf_kwargs = dict(
         r=r,
         peft_type=PeftType.LORA,
         base_model_name_or_path=model_dir,
         task_type="CAUSAL_LM",
         lora_dropout=kwargs.get("lora_dropout", 0.0),
-        lora_alpha=r ** (3 / 2) * 2,
+        lora_alpha=lora_alpha,
     )
 
     peft_conf_kwargs.update(kwargs)
