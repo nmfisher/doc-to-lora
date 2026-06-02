@@ -611,8 +611,9 @@ class Idefics2PerceiverResampler(Idefics2PreTrainedModel):
 
         self.layernorm = Idefics2RMSNorm(self.hidden_size, eps=self.rms_norm_eps)
 
+        # forward already branches on this (uses _prepare_4d_attention_mask
+        # when not flash_attn_2), so allow eager.
         self._use_flash_attention_2 = config._attn_implementation == "flash_attention_2"
-        assert self._use_flash_attention_2
 
     def forward(
         self,
