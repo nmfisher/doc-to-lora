@@ -156,6 +156,9 @@ class Idefics2PreTrainedModel(PreTrainedModel):
     ]
     _skip_keys_device_placement = "past_key_values"
     _supports_flash_attn_2 = True
+    # transformers 5.x dropped the `_2` suffix in the dispatch check; both
+    # names are kept for cross-version compat.
+    _supports_flash_attn = True
     _supports_sdpa = True
     _supports_cache_class = True
 
