@@ -798,16 +798,26 @@ class ModulatedPretrainedModel(nn.Module):
                 position_ids,
             )
         model_outputs = self.base_model(*model_inputs_args, **model_inputs_kwargs)
-        # Bare Gemma4TextModel returns last_hidden_state, not logits. The trainer
-        # reads outputs.logits, so project last_hidden_state through the stashed
-        # lm_head (set in model_loading.py's Gemma 4 branch).
+        # Bare Gemma4TextModel returns last_hidden_state, not logits. Trainer
+        # reads outputs.logits, so project through the stashed lm_head and
+        # return a fresh CausalLMOutputWithPast — adding .logits onto the
+        # bare model's ModelOutput via setattr is brittle (its OrderedDict
+        # superclass synchronizes only known field names with the underlying
+        # dict, so the dot-access path through __getattr__ can still miss).
         if (
             getattr(model_outputs, "logits", None) is None
             and getattr(model_outputs, "last_hidden_state", None) is not None
             and hasattr(self.base_model, "lm_head")
         ):
-            model_outputs.logits = self.base_model.lm_head(
-                model_outputs.last_hidden_state
+            from transformers.modeling_outputs import CausalLMOutputWithPast
+
+            logits = self.base_model.lm_head(model_outputs.last_hidden_state)
+            model_outputs = CausalLMOutputWithPast(
+                loss=None,
+                logits=logits,
+                past_key_values=getattr(model_outputs, "past_key_values", None),
+                hidden_states=getattr(model_outputs, "hidden_states", None),
+                attentions=getattr(model_outputs, "attentions", None),
             )
 
         if return_generated_lora:
