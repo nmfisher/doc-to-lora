@@ -91,6 +91,16 @@ def main() -> None:
     p.add_argument("--context-file", type=str, default=None)
     p.add_argument("--question", type=str, default=DEFAULT_QUESTION)
     p.add_argument("--max-new-tokens", type=int, default=160)
+    p.add_argument(
+        "--scaler-b-boost",
+        type=float,
+        default=1.0,
+        help=(
+            "Inference-time multiplier applied to all scaler_B params before "
+            "internalize(). 1.0 = unchanged; 10 ≈ simulates lora_alpha bumped 10×; "
+            "100 ≈ what the hypernet 'would' do after a lot more training."
+        ),
+    )
     args = p.parse_args()
 
     if args.checkpoint:
@@ -208,6 +218,18 @@ def main() -> None:
         print(f"  first missing: {missing[:3]}")
     if unexpected:
         print(f"  first unexpected: {unexpected[:3]}")
+
+    if args.scaler_b_boost != 1.0:
+        n_boosted = 0
+        with torch.no_grad():
+            for name, p in model.hypernet.named_parameters():
+                if "scaler_B" in name:
+                    p.mul_(args.scaler_b_boost)
+                    n_boosted += 1
+        print(
+            f"[test] BOOSTED {n_boosted} scaler_B params by {args.scaler_b_boost}× "
+            f"(simulates higher effective lora_alpha at inference time)"
+        )
 
     section("Step 3: load test context + question")
     if args.context_file:
