@@ -23,6 +23,10 @@ def lora_forward(
     *args,
     **kwargs,
 ) -> Float[Tensor, "tot_q seq_len d_out"]:
+    # apply_lora_to_layers may have bound seq_lens/tot_len for the packed
+    # variant. Discard here so nn.Linear.forward doesn't choke on them.
+    kwargs.pop("seq_lens", None)
+    kwargs.pop("tot_len", None)
     # A: [n_ctx, r, d_in] -> [tot_q, r, d_in]
     A = A.repeat_interleave(n_qs, dim=0, output_size=tot_q)
     # B: [n_ctx, d_out, r] -> [tot_q, d_out, r]
