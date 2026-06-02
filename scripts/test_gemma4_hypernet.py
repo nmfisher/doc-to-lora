@@ -22,12 +22,12 @@ Args:
 """
 
 import argparse
-import glob
 import os
 import sys
 from pathlib import Path
 
 import torch
+import yaml
 from transformers import AutoConfig
 
 sys.path.insert(0, "src")
@@ -114,12 +114,30 @@ def main() -> None:
     print(f"[test] weights: {weights_path}")
 
     section("Step 1: construct fresh modulated model (matches training setup)")
+    # Read the saved training args so AggregatorArguments / HypernetArguments
+    # match exactly. Without this we hit shape mismatches like latents_q
+    # (8 in YAML vs 208 in dataclass default).
+    args_yaml_path = ckpt_dir.parent / "args.yaml"
+    if not args_yaml_path.exists():
+        # Older runs may store at run root rather than per-checkpoint
+        args_yaml_path = ckpt_dir.parent / "args.yaml"
+    saved_args = {}
+    if args_yaml_path.exists():
+        with args_yaml_path.open() as f:
+            saved_args = yaml.safe_load(f) or {}
+        print(f"[test] loaded training args from {args_yaml_path}")
+    else:
+        print(f"[test] WARNING: {args_yaml_path} not found; using dataclass defaults")
+
+    def pick(key, default):
+        return saved_args.get(key, default)
+
     peft_config = get_lora_config(
         MODEL,
-        lora_r=8,
-        lora_dropout=0.0,
-        target_modules=TARGET_MODULES,
-        lora_alpha=8,
+        lora_r=pick("lora_r", 8),
+        lora_dropout=pick("lora_dropout", 0.0),
+        target_modules=pick("target_modules", TARGET_MODULES),
+        lora_alpha=pick("lora_alpha", 8),
     )
     base_model, tokenizer = get_model_and_tokenizer(
         model_name_or_path=MODEL,
@@ -135,14 +153,23 @@ def main() -> None:
 
     ctx_encoder_args = CtxEncoderArguments(
         ctx_encoder_model_name_or_path=MODEL,
-        ctx_encoder_type=CTX_ENCODER_TYPE.PER_LAYER_ACTIVATIONS,
-        layer_idx=8,
+        ctx_encoder_type=pick("ctx_encoder_type", CTX_ENCODER_TYPE.PER_LAYER_ACTIVATIONS),
+        layer_idx=pick("layer_idx", 8),
+    )
+    hypernet_args = HypernetArguments(
+        per_rank_gen=pick("per_rank_gen", True),
+        per_layer_processing=pick("per_layer_processing", True),
+    )
+    aggregator_args = AggregatorArguments(
+        n_latent_queries=pick("n_latent_queries", 8),
+        num_blocks=pick("num_blocks", 9),
+        num_self_attn_per_block=pick("num_self_attn_per_block", 0),
     )
     hypernet_config = get_hypernet_config(
         base_model,
         ctx_cfg,
-        HypernetArguments(per_rank_gen=True, per_layer_processing=True),
-        AggregatorArguments(),
+        hypernet_args,
+        aggregator_args,
         ctx_encoder_args,
         peft_config=peft_config,
     )
