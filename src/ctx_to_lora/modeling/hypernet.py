@@ -125,6 +125,7 @@ def get_hypernet_config(
             lora_config.r,
             hypernet_args.per_rank_gen,
             aggregator_args,
+            num_layers=len(indices),
         ),
     )
 

@@ -61,11 +61,17 @@ def get_aggregator_config(
     lora_r: int,
     per_rank_gen: bool,
     aggregator_args: AggregatorArguments,
+    num_layers: int | None = None,
 ):
+    # num_layers must match the hypernet head's layer count. For homogeneous
+    # models that's get_num_layers(model); for Gemma 4 (heterogeneous) it's the
+    # size of the majority-group layer_indices selected by Phase 3. Caller
+    # passes that count explicitly via num_layers; fall back to get_num_layers
+    # for back-compat with sites that haven't been updated yet.
     return AggregatorConfig(
         feature_size=ctx_encoder_model_config.hidden_size,
         output_size=output_size,
-        num_layers=get_num_layers(model),
+        num_layers=num_layers if num_layers is not None else get_num_layers(model),
         num_modules=num_modules,
         num_extra_modules=num_extra_modules,
         lora_r=lora_r,
