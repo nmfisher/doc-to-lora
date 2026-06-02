@@ -1,0 +1,24 @@
+{{- bos_token }}
+{%- if messages[0]['role'] == 'system' %}
+    {%- set system_message = messages[0]['content'] %}
+    {%- set loop_messages = messages[1:] %}
+{%- else %}
+    {%- set loop_messages = messages %}
+{%- endif %}
+{% for message in loop_messages %}
+    {% if (message['role'] == 'assistant') %}
+        {% set role = 'model' %}
+    {% else %}
+        {% set role = message['role'] %}
+    {% endif %}
+    {%- if message['role'] == 'user' and loop.first and system_message is defined %}
+        {{ '<|turn>' + role + '\n' + system_message + '\n\n' + message['content'] | trim + '<turn|>\n' }}
+    {%- elif message['role'] == 'assistant' %}
+        {{ '<|turn>' + role + '\n' }}{% generation %}{{ message['content'] + '<turn|>' }}{% endgeneration %}{{ '\n' }}
+    {%- else %}
+        {{ '<|turn>' + role + '\n' + message['content'] | trim + '<turn|>\n' }}
+    {%- endif %}
+{% endfor %}
+{% if add_generation_prompt %}
+    {{'<|turn>model\n'}}
+{% endif %}
