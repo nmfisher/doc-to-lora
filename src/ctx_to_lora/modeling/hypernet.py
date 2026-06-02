@@ -443,7 +443,11 @@ class HyperLoRA(nn.Module):
         if self.target_modules:
             lora_emb = self.layers(lora_emb)
             norm = torch.norm(lora_emb, dim=-1, keepdim=True)
-            norm_lora_emb = lora_emb / norm
+            # Add epsilon: zero/near-zero norm at any position blows the
+            # backward gradient up to NaN (d(x/n)/dx = 1/n - x*x/n^3 → inf
+            # when n→0). Even one such position poisons the whole step in
+            # bf16. Surfaces as grad_norm=NaN on step 1's optimizer reduce.
+            norm_lora_emb = lora_emb / (norm + 1e-6)
             flat_loras = self.head(norm_lora_emb)
 
         flat_layernorms = None
