@@ -112,7 +112,9 @@ def get_hypernet_config(
         base_hidden_size=model.config.hidden_size,
         lora_config=lora_config,
         layer_indices=indices,
-        feature_sizes=get_peft_in_out_features(model, peft_config=lora_config),
+        feature_sizes=get_peft_in_out_features(
+            model, peft_config=lora_config, layer_indices=indices
+        ),
         aggregator_config=get_aggregator_config(
             model,
             ctx_encoder_model_config,

@@ -233,29 +233,55 @@ def save_yaml(data, path):
         yaml.dump(data, file)
 
 
-def get_peft_modules(model, peft_config: PeftConfig) -> list[dict[str, str]]:
+def get_peft_modules(
+    model, peft_config: PeftConfig, layer_indices: Iterable[int] | None = None
+) -> list[dict[str, str]]:
     # Non-PEFT path (Gemma 4): the model is bare, so target modules are plain
     # nn.Linear instances rather than BaseTunerLayer wrappers.
     leaf_type = BaseTunerLayer if isinstance(model, PeftModel) else torch.nn.Linear
-    return [
-        {"name": name, "module": module}
-        for name, module in model.named_modules()
-        if name.split(".")[-1] in peft_config.target_modules
-        and isinstance(module, leaf_type)
-        and check_target_module_exists(peft_config, name)
-    ]
+    # Optional layer filter: heterogeneous models (Gemma 4) have layers with
+    # different dim profiles. The hypernet handles only the majority-group
+    # subset, so feature-dim collection must skip the rest — otherwise
+    # get_peft_in_out_features's "all q_projs have the same shape" assertion
+    # would fire on cross-profile layers. layer_indices is matched against
+    # the integer between `layers.` and the next `.` in each module name.
+    layer_set = set(layer_indices) if layer_indices is not None else None
+
+    def _layer_idx_for(name: str) -> int | None:
+        if "layers." not in name:
+            return None
+        try:
+            return int(name.split("layers.")[-1].split(".")[0])
+        except ValueError:
+            return None
+
+    out = []
+    for name, module in model.named_modules():
+        if name.split(".")[-1] not in peft_config.target_modules:
+            continue
+        if not isinstance(module, leaf_type):
+            continue
+        if not check_target_module_exists(peft_config, name):
+            continue
+        if layer_set is not None:
+            idx = _layer_idx_for(name)
+            if idx is None or idx not in layer_set:
+                continue
+        out.append({"name": name, "module": module})
+    return out
 
 
 def get_peft_in_out_features(
     model,
     peft_config: PeftConfig | None = None,
+    layer_indices: Iterable[int] | None = None,
 ) -> tuple[dict[str, int], dict[str, int]]:
     if peft_config is None:
         return None, None
     is_peft = isinstance(model, PeftModel)
     in_features = dict()
     out_features = dict()
-    for module_info in get_peft_modules(model, peft_config):
+    for module_info in get_peft_modules(model, peft_config, layer_indices=layer_indices):
         module_name = module_info["name"]
         module = module_info["module"]
         # In PEFT mode the LoRA wrapper exposes `.base_layer`; in the bare-model
