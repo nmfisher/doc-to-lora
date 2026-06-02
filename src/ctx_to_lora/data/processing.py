@@ -1023,6 +1023,10 @@ def pack(
     seed: int,
     num_proc: int = 0,
 ):
+    # Honor DATASETS_NUM_PROC env override even when the caller passes a
+    # hardcoded value (train.py uses num_proc=30). Without this, container
+    # envs with small /dev/shm trip the multiprocess pool's BlockingIOError.
+    num_proc = _np(num_proc)
     kwargs = dict(
         max_packed_inp_len=max_packed_inp_len,
         max_packed_ctx_len=max_packed_ctx_len,
