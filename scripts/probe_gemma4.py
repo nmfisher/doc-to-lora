@@ -359,10 +359,13 @@ if not has_generate:
         " the bare model). Verifying that pattern below."
     )
 
-# Mirror the repo's delegation pattern (model_loading.py:get_model Gemma 4 branch).
+# Mirror the repo's delegation pattern (model_loading.py:get_model Gemma 4
+# branch). NOTE: don't also set `lm._gemma4_full_wrapper = full_model` — that
+# would register full_model as a child module of lm, and full_model already
+# contains lm as a child (via .model.language_model), so .train(mode) would
+# recurse forever. The bound method's __self__ keeps full_model alive.
 delegated_ok = False
 if full_model is not None and callable(getattr(full_model, "generate", None)):
-    lm._gemma4_full_wrapper = full_model
     lm.generate = full_model.generate
     delegated_ok = callable(getattr(lm, "generate", None))
 check(

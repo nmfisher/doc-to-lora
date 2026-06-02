@@ -63,9 +63,11 @@ def get_model_and_tokenizer(
     if getattr(model, "generation_config", None):
         model.generation_config.pad_token_id = tokenizer.pad_token_id
     # Gemma 4: also propagate pad_token_id onto the full wrapper, since
-    # generate() flows through it (see get_model for the delegation setup).
-    wrapper = getattr(model, "_gemma4_full_wrapper", None)
-    if wrapper is not None:
+    # generate() flows through it. Recover the wrapper via the bound method's
+    # __self__ (see get_model for why we don't store it as a Module attribute).
+    bound_generate = getattr(model, "generate", None)
+    wrapper = getattr(bound_generate, "__self__", None)
+    if wrapper is not None and wrapper is not model:
         wrapper.config.pad_token_id = tokenizer.pad_token_id
         if getattr(wrapper, "generation_config", None):
             wrapper.generation_config.pad_token_id = tokenizer.pad_token_id
@@ -181,9 +183,15 @@ def get_model(
         # missing — would crash eval at hypernet.py's `self.base_model.generate(...)`.
         # Delegate to the full wrapper (which inherits GenerationMixin and routes
         # its forward back through this same text model, picking up our LoRA
-        # patches). Bare + wrapper share weights, so this only keeps a Python
-        # object alive — no extra GPU memory.
-        model._gemma4_full_wrapper = full_model
+        # patches). The bound method's __self__ keeps full_model alive — no
+        # extra GPU memory since they share weights.
+        #
+        # We must NOT store full_model as a Module attribute (e.g.,
+        # `model._gemma4_full_wrapper = full_model`): nn.Module.__setattr__
+        # would register it as a child module, and full_model.model.language_model
+        # IS model — that's a child-cycle that makes model.train(mode) recurse
+        # forever. To recover the wrapper later (e.g., for pad_token_id
+        # propagation), inspect model.generate.__self__.
         model.generate = full_model.generate
     else:
         model = Gemma3ForConditionalGeneration.from_pretrained(**model_init_kwargs)
