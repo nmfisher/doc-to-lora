@@ -65,8 +65,8 @@ gradient_accumulation_steps: 11
 # above the limit are silently dropped by pack_data_points_by_length;
 # the longer cocoon contexts will get skipped here. If that's lossy
 # enough to hurt, drop WINDOW_CHARS in code_qa_gen.py to ~40K instead.
-max_packed_inp_len: 2048
-max_packed_ctx_len: 8192
+max_packed_inp_len: 1024
+max_packed_ctx_len: 2048
 
 # data — cocoon code-QA (queries.jsonl converted via queries_to_parquet.py).
 # Registered as cocoon_code_qa in DS_KWARGS; the parquet must live at
