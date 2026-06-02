@@ -124,7 +124,11 @@ def main() -> None:
     saved_args = {}
     if args_yaml_path.exists():
         with args_yaml_path.open() as f:
-            saved_args = yaml.safe_load(f) or {}
+            # args.yaml contains Python object tags like
+            # !!python/object/apply:transformers.trainer_utils.IntervalStrategy
+            # so safe_load chokes. We trust this file (we wrote it), so use
+            # UnsafeLoader to deserialize Python objects.
+            saved_args = yaml.load(f, Loader=yaml.UnsafeLoader) or {}
         print(f"[test] loaded training args from {args_yaml_path}")
     else:
         print(f"[test] WARNING: {args_yaml_path} not found; using dataclass defaults")
@@ -155,6 +159,7 @@ def main() -> None:
         ctx_encoder_model_name_or_path=MODEL,
         ctx_encoder_type=pick("ctx_encoder_type", CTX_ENCODER_TYPE.PER_LAYER_ACTIVATIONS),
         layer_idx=pick("layer_idx", 8),
+        ctx_encoder_last_layer=pick("ctx_encoder_last_layer", None),
     )
     hypernet_args = HypernetArguments(
         per_rank_gen=pick("per_rank_gen", True),

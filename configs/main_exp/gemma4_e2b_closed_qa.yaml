@@ -30,7 +30,23 @@ target_modules:
 use_kl_loss: false
 
 ctx_encoder_type: per_layer_activations
-n_latent_queries: 8
+# Cap the encoder layer count so the perceiver's per-layer rearrange dim
+# matches len(layer_indices). PerLayerActivations does
+# `base_model.layers = base_model.layers[:ctx_encoder_last_layer - 1]`,
+# so this gives layers[:15] = 15 layers + 1 embed output = 16 hidden
+# states, matching aggregator.num_layers = len(layer_indices) = 16
+# (Gemma 4 majority dim group). Without this we'd get 35 encoder hidden
+# states vs 16 decoder layers, causing the position_ids repeat (uses
+# self.num_layers=16) to disagree with the ctx_features rearrange (uses
+# the actual encoder dim=35). Same setup as SakanaAI Gemma 2 where
+# 26 encoder layers == 26 decoder layers by coincidence.
+ctx_encoder_last_layer: 16
+# Per-segment latent count. With per_layer_activations + position_ids,
+# the perceiver runs N segments (one per encoder layer) each with
+# n_latent_queries latents, so effective latents = N * n_latent_queries.
+# SakanaAI Gemma 2 used 8 latents × 26 layers = 208 effective. For us:
+# 16 latents × 16 layers = 256 effective (slightly more capacity).
+n_latent_queries: 16
 # Full depth — perceiver attention is SDPA EFFICIENT_ATTENTION with a
 # flatten-Q + block-diagonal mask so K/V aren't expanded across the
 # per-segment Q batch. See idefics2.py Idefics2PerceiverFlashAttention2.
