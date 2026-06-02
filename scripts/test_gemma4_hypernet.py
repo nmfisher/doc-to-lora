@@ -248,6 +248,12 @@ def main() -> None:
     print(baseline_text.strip())
 
     section("Step 5: with internalized context (hypernet-generated LoRA)")
+    # model.internalize() calls get_tokenizer(self.ctx_encoder.base_model.name_or_path),
+    # but PerLayerActivations stashes the inner Gemma4TextModel whose
+    # name_or_path got cleared. Restore it from MODEL so the tokenizer
+    # lookup succeeds.
+    if not getattr(model.ctx_encoder.base_model, "name_or_path", ""):
+        model.ctx_encoder.base_model.name_or_path = MODEL
     model.internalize(context_str)
 
     with torch.no_grad():
