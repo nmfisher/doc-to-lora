@@ -22,7 +22,12 @@ target_modules:
   - up_proj
   - down_proj
 
-use_kl_loss: true
+# KL loss requires teacher-generated logprobs columns (logprobs_vals,
+# logprobs_indices) in the dataset. SakanaAI's self_gen produces those;
+# cocoon's code_qa_gen.py does not, so KL is off for cocoon training.
+# Re-enable once the cocoon pipeline generates logprob distillation
+# targets (would need a separate teacher-model pass over queries.jsonl).
+use_kl_loss: false
 
 ctx_encoder_type: per_layer_activations
 n_latent_queries: 8
