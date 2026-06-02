@@ -33,17 +33,12 @@ gradient_accumulation_steps: 11
 max_packed_inp_len: 6144
 max_packed_ctx_len: 6144
 
-# data
+# data — cocoon code-QA (queries.jsonl converted via queries_to_parquet.py).
+# Registered as cocoon_code_qa in DS_KWARGS; the parquet must live at
+# data/raw_datasets/cocoon_code_qa/train/ds.parquet on the trainer's filesystem.
 train_ds_names:
-  - self_gen/google/gemma-4-E2B-it_temp_0.0_closed_qa_prob_1.0/fw_qa_v2/min_0_to_2000/train/*level_1*.parquet
-  - self_gen/google/gemma-4-E2B-it_temp_0.0_closed_qa_prob_0.0/pwc_compact
-  - self_gen/google/gemma-4-E2B-it_temp_0.0_closed_qa_prob_1.0/squad_compact
-  - self_gen/google/gemma-4-E2B-it_temp_0.0_closed_qa_prob_1.0/ropes_compact
-  - self_gen/google/gemma-4-E2B-it_temp_0.0_closed_qa_prob_1.0/drop_compact
+  - cocoon_code_qa
 
-val_ds_names:
-  - squad
-  - pwc
-  - drop
-  - ropes
-  - self_gen/google/gemma-4-E2B-it_temp_0.0_closed_qa_prob_0.0/fw_qa_v2/min_0_to_2000/train/*level_0_val*.parquet
+# val_ds_names is parsed but unused unless --eval_strategy != "no" (default
+# in the launch script is "no"). Left empty for the first training run.
+val_ds_names: []

@@ -54,6 +54,16 @@ DS_KWARGS = {
             split="train",
         ),
     ),
+    # cocoon code-QA: queries.jsonl produced by code_qa_gen.py, converted via
+    # cocoon/python/queries_to_parquet.py. One context per repo-window, ~10
+    # prompts/responses per context. Same schema as pwc_compact.
+    "cocoon_code_qa": dict(
+        train=dict(
+            path="parquet",
+            data_files="data/raw_datasets/cocoon_code_qa/train/ds.parquet",
+            split="train",
+        ),
+    ),
     "pwc_compact_tiny": dict(
         train=dict(
             path="parquet",
