@@ -31,34 +31,18 @@ use_kl_loss: false
 
 ctx_encoder_type: per_layer_activations
 n_latent_queries: 8
-# Restored to 9 after replacing the perceiver's flash-attn path with
-# SDPA-in-fp32 (idefics2.py Idefics2PerceiverFlashAttention2.forward).
-# That mirrors Gemma 4's own stability pattern — its eager_attention_forward
-# always upcasts softmax to fp32. If NaN comes back at depth, the next
-# move is per-block layernorm/scaling rather than dropping depth.
-num_blocks: 9  # SDPA EFFICIENT_ATTENTION + per-layer gradient checkpointing in the perceiver lets us run at depth without NaN / OOM
+# Full depth — perceiver attention is SDPA EFFICIENT_ATTENTION with a
+# flatten-Q + block-diagonal mask so K/V aren't expanded across the
+# per-segment Q batch. See idefics2.py Idefics2PerceiverFlashAttention2.
+num_blocks: 9
 num_self_attn_per_block: 0
 
-# Tuning for the Gemma 4 hypernet (~750M trainable params with
-# n_layers=16, n_modules=5, d_lora=13824, d_latent=512). PyYAML 1.1
-# requires the +/- sign in exponents to dispatch as float.
-#
-# max_grad_norm=1e+5: total grad L2 norm naturally runs ~1-3e6 at
-# step 1 (sqrt(750M) * avg per-param grad ~100). HF's default of
-# 1.0 scales gradients to ~1e-7 → no learning. 1e5 keeps ~3% of
-# the signal.
-#
-# learning_rate=1e-4: with the above clip ratio, effective per-
-# param update lands ~3-4e-4 / step. Bump up if loss plateaus.
-#
-# Caveat: the perceiver uses flash-attn whose backward is
-# non-deterministic (atomic reductions). On giant grads, this
-# occasionally produces a stray NaN that poisons optimizer state.
-# If a run NaN's at step 1, just re-run; the fix is to either
-# rewrite the perceiver to SDPA or fp32 the backward.
-max_grad_norm: 1.0e+5
-learning_rate: 1.0e-4
-
+# HF defaults for max_grad_norm (1.0) and learning_rate (5e-5) work here:
+# with the SDPA stability fix landed, real grad_norm is ~0.78, not the
+# 1e+6 we saw with the broken flash backward. We previously bumped
+# max_grad_norm to 1e+5 and lr to 1e-4 to compensate for clipping
+# pathological gradients caused by the backward NaN; both are now
+# unnecessary.
 gradient_accumulation_steps: 11
 # Cocoon's 64K-char repo windows are ~16-20K tokens; max_packed_ctx_len
 # of 32K OOM'd the A100-80GB at training time, so back off to 16K. Items
