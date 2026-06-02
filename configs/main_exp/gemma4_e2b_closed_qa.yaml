@@ -35,14 +35,13 @@ num_blocks: 9
 num_self_attn_per_block: 0
 
 gradient_accumulation_steps: 11
-# Bumped from 6144 (SakanaAI default) to fit cocoon's 64K-char repo windows
-# (~16-20K tokens). max_packed_ctx_len gates the context (encoder side);
-# items above the limit are silently dropped by pack_data_points_by_length,
-# which is how we ended up with 0 packed samples on the first try.
-# max_packed_inp_len is the QA+prompt side — kept generous to allow
-# multi-QA packing per sample.
-max_packed_inp_len: 8192
-max_packed_ctx_len: 32768
+# Cocoon's 64K-char repo windows are ~16-20K tokens; max_packed_ctx_len
+# of 32K OOM'd the A100-80GB at training time, so back off to 16K. Items
+# above the limit are silently dropped by pack_data_points_by_length;
+# the longer cocoon contexts will get skipped here. If that's lossy
+# enough to hurt, drop WINDOW_CHARS in code_qa_gen.py to ~40K instead.
+max_packed_inp_len: 4096
+max_packed_ctx_len: 16384
 
 # data — cocoon code-QA (queries.jsonl converted via queries_to_parquet.py).
 # Registered as cocoon_code_qa in DS_KWARGS; the parquet must live at
