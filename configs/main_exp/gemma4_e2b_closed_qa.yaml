@@ -47,7 +47,9 @@ num_self_attn_per_block: 0
 #   - learning_rate: with the clip ratio above, 1e-4 gives an
 #     effective per-param update around 3-4e-4 per step. Bump up
 #     once you confirm loss curves are healthy.
-max_grad_norm: 1.0e5
+# Use unambiguous float syntax — PyYAML 1.1 parses "1.0e5" as a string
+# (requires +/- sign in the exponent for float dispatch).
+max_grad_norm: 1.0e+5
 learning_rate: 1.0e-4
 gradient_accumulation_steps: 11
 # Cocoon's 64K-char repo windows are ~16-20K tokens; max_packed_ctx_len
