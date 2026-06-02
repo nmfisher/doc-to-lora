@@ -31,7 +31,10 @@ use_kl_loss: false
 
 ctx_encoder_type: per_layer_activations
 n_latent_queries: 8
-num_blocks: 9
+# Was 9; FlashAttnVarlenFuncBackward NaN'd through the depth on Gemma 4 +
+# bf16 (anomaly detection localized it). Single block for now — restore
+# once the perceiver gets a SDPA path / stability fix.
+num_blocks: 1
 num_self_attn_per_block: 0
 
 gradient_accumulation_steps: 11
