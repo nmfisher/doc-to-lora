@@ -259,24 +259,27 @@ def pack_batch(
         np.mean(ctx_packing_efficiency_ratios) if ctx_packing_efficiency_ratios else 0
     )
 
+    # np.min/np.max raise on zero-size arrays. A worker can legitimately
+    # receive a shard that produces no packed items (small datasets +
+    # high num_proc, or filter-heavy inputs), so guard the stats here.
+    def _len_stats(arr):
+        if len(arr) == 0:
+            return {"avg": 0.0, "std": 0.0, "min": 0, "max": 0}
+        return {
+            "avg": float(np.mean(arr)),
+            "std": float(np.std(arr)),
+            "min": int(np.min(arr)),
+            "max": int(np.max(arr)),
+        }
+
     # Create packing statistics dictionary
     packing_stats = {
         "original_samples": inp_count,
         "packed_samples": len(idx_pairs),
         "avg_inp_packing_efficiency": float(avg_inp_packing_efficiency),
         "avg_ctx_packing_efficiency": float(avg_ctx_packing_efficiency),
-        "input_ids_length_stats": {
-            "avg": float(np.mean(packed_inp_lens_arr)),
-            "std": float(np.std(packed_inp_lens_arr)),
-            "min": int(np.min(packed_inp_lens_arr)),
-            "max": int(np.max(packed_inp_lens_arr)),
-        },
-        "context_ids_length_stats": {
-            "avg": float(np.mean(packed_ctx_lens_arr)),
-            "std": float(np.std(packed_ctx_lens_arr)),
-            "min": int(np.min(packed_ctx_lens_arr)),
-            "max": int(np.max(packed_ctx_lens_arr)),
-        },
+        "input_ids_length_stats": _len_stats(packed_inp_lens_arr),
+        "context_ids_length_stats": _len_stats(packed_ctx_lens_arr),
     }
 
     # Save to metadata_path if provided
