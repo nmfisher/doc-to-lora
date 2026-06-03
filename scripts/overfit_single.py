@@ -1,15 +1,26 @@
-"""Architecture diagnostic: can the hypernet overfit a single (context, prompt, response)?
+"""Architecture diagnostic: can the hypernet learn context-specific LoRAs?
 
-We hardcode one example and train the hypernet on it for N steps. If train loss
-drives to ~0 AND the modulated model produces the trained response verbatim
-when given the trained context, the architecture is capable of context-specific
-LoRA generation. If it can't, the failure is structural.
+Trains on TWO examples that share the same PROMPT but have different
+(context, response) pairs:
+  - iterative fibonacci → "O(n) / O(1) / two variables"
+  - recursive  fibonacci → "O(2^n) / O(n) stack / no memoization"
 
-Sanity checks at end:
-  - Test 1: trained context + trained prompt -> should produce trained response
-  - Test 2: alternative context + trained prompt -> should produce something
-    DIFFERENT (proves the response wasn't just memorized from the prompt alone)
-  - Test 3: no LoRA at all (baseline) -> the original wrong-generic answer
+The single-example version of this script confirmed the hypernet can
+drive train loss to zero, but only by learning a CONSTANT LoRA that
+ignored the context (the same response came out for any input context).
+Two examples with distinct correct responses force the optimizer to
+choose between: (a) learning context-sensitivity, or (b) settling on
+some compromise / averaged constant LoRA — which can't drive loss to
+zero on both.
+
+Successful run looks like:
+  - Both per-example losses drive to ~0.
+  - Test outputs differ across contexts (iterative != recursive).
+  - Each test output matches its trained response.
+
+Failure mode (architecture-degenerate):
+  - Loss stalls around the cross-entropy of mixing the two responses.
+  - Test outputs are identical regardless of context.
 
 Run:
     python scripts/overfit_single.py --steps 300 --lr 1e-3
@@ -44,7 +55,17 @@ from ctx_to_lora.trainer import causal_lm_ce_loss
 MODEL = os.environ.get("MODEL_DIR", "google/gemma-4-E2B-it")
 TARGET_MODULES = ["q_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
 
-CONTEXT = """\
+# Two training examples that share the same PROMPT but differ in (context,
+# response). A context-blind LoRA can't fit both — it could match the modal
+# response or some average, but not produce two distinct correct answers
+# when conditioned on different contexts. Successful overfit on BOTH proves
+# the architecture can encode context-specific information through the LoRA.
+PROMPT = (
+    "What is the time complexity of the fibonacci function shown in the "
+    "context, and how much auxiliary memory does it use?"
+)
+
+CONTEXT_ITER = """\
 def fibonacci(n: int) -> int:
     \"\"\"Return the nth Fibonacci number iteratively.
 
@@ -60,18 +81,38 @@ def fibonacci(n: int) -> int:
     return b
 """
 
-PROMPT = (
-    "What is the time complexity of the fibonacci function shown in the "
-    "context, and how much auxiliary memory does it use?"
+RESPONSE_ITER = (
+    "This is the iterative implementation. It uses O(n) time and O(1) "
+    "auxiliary memory, storing only two running totals (a and b) and "
+    "updating them in a loop. No recursion is involved."
 )
 
-# Distinctive target answer: contains "O(n)", "O(1)", "(a and b)" — words the
-# model won't produce naturally if it falls back to its recursive-Fibonacci prior.
-RESPONSE = (
-    "The function uses O(n) time and O(1) auxiliary memory. "
-    "It only stores two integer variables (a and b) at a time, with no recursion."
+CONTEXT_REC = """\
+def fibonacci(n: int) -> int:
+    \"\"\"Return the nth Fibonacci number recursively.
+
+    Defines the function in terms of itself: F(n) = F(n-1) + F(n-2).
+    There is no memoization, so identical subproblems are recomputed
+    many times all the way down to the base case.
+    \"\"\"
+    if n < 2:
+        return n
+    return fibonacci(n - 1) + fibonacci(n - 2)
+"""
+
+RESPONSE_REC = (
+    "This is the naive recursive implementation. It uses O(2^n) time "
+    "because identical subproblems are recomputed without memoization, "
+    "and O(n) auxiliary stack memory proportional to the recursion depth."
 )
 
+EXAMPLES = [
+    {"label": "iterative", "context": CONTEXT_ITER, "response": RESPONSE_ITER},
+    {"label": "recursive", "context": CONTEXT_REC,  "response": RESPONSE_REC},
+]
+
+# Unrelated context used only at test time as a probe — neither trained
+# response should appear; we want to see what the model "defaults" to.
 CONTEXT_ALT = """\
 def quicksort(arr):
     \"\"\"Sort using Lomuto partition. Average O(n log n), worst O(n^2).\"\"\"
@@ -177,31 +218,9 @@ def main() -> None:
 
     model.train()
 
-    section("Step 3: tokenize the single training example")
-    # Context for the hypernet
-    ctx_enc = ctx_tokenizer(CONTEXT, return_tensors="pt").to(device)
-    ctx_ids = ctx_enc["input_ids"]
-    # Direct model.forward() requires the caller to pass ctx_attn_mask;
-    # only the internalize() / generate() paths build it implicitly.
-    ctx_attn_mask = torch.ones_like(ctx_ids)
-    # n_ctx_chunks[i] = how many chunks context i was split into. Our
-    # single context fits in one chunk, so [1]. (split_too_long_ctx in
-    # processing.py produces this for the production pipeline.)
-    n_ctx_chunks = torch.ones(ctx_ids.shape[0], dtype=torch.int32, device=device)
-
-    # Full chat (user prompt + assistant response). Gemma 4's tokenizer
-    # returns a BatchEncoding (dict) from apply_chat_template, so we use
-    # return_dict=True and pull ["input_ids"] — same pattern as the
-    # working test_gemma4_hypernet.py.
-    full_enc = tokenizer.apply_chat_template(
-        [{"role": "user", "content": PROMPT}, {"role": "assistant", "content": RESPONSE}],
-        return_tensors="pt",
-        add_generation_prompt=False,
-        return_dict=True,
-    ).to(device)
-    full_ids = full_enc["input_ids"]
-
-    # Prompt-only (to find where the response starts, for label masking)
+    section("Step 3: tokenize training examples")
+    # Prompt-only (same across examples) — used to find where the response
+    # starts for label masking.
     prompt_enc = tokenizer.apply_chat_template(
         [{"role": "user", "content": PROMPT}],
         return_tensors="pt",
@@ -211,15 +230,50 @@ def main() -> None:
     prompt_ids = prompt_enc["input_ids"]
     prompt_end = prompt_ids.shape[-1]
 
-    input_ids = full_ids
-    attention_mask = torch.ones_like(input_ids)
-    labels = full_ids.clone()
-    labels[:, :prompt_end] = -100
+    train_examples = []
+    for ex in EXAMPLES:
+        ctx_enc = ctx_tokenizer(ex["context"], return_tensors="pt").to(device)
+        ctx_ids = ctx_enc["input_ids"]
+        # Direct model.forward() requires the caller to pass ctx_attn_mask;
+        # only the internalize() / generate() paths build it implicitly.
+        ctx_attn_mask = torch.ones_like(ctx_ids)
+        # n_ctx_chunks[i] = how many chunks context i was split into. Our
+        # single context fits in one chunk, so [1]. (split_too_long_ctx in
+        # processing.py produces this for the production pipeline.)
+        n_ctx_chunks = torch.ones(ctx_ids.shape[0], dtype=torch.int32, device=device)
 
-    n_response_tokens = (labels[0] != -100).sum().item()
-    print(f"[overfit] ctx_ids {tuple(ctx_ids.shape)}  "
-          f"input_ids {tuple(input_ids.shape)}  "
-          f"prompt_end={prompt_end}  n_response_tokens={n_response_tokens}", flush=True)
+        # Full chat (user prompt + assistant response). Gemma 4's tokenizer
+        # returns a BatchEncoding (dict) from apply_chat_template, so we use
+        # return_dict=True and pull ["input_ids"] — same pattern as the
+        # working test_gemma4_hypernet.py.
+        full_enc = tokenizer.apply_chat_template(
+            [{"role": "user", "content": PROMPT},
+             {"role": "assistant", "content": ex["response"]}],
+            return_tensors="pt",
+            add_generation_prompt=False,
+            return_dict=True,
+        ).to(device)
+        full_ids = full_enc["input_ids"]
+        attention_mask = torch.ones_like(full_ids)
+        labels = full_ids.clone()
+        labels[:, :prompt_end] = -100
+
+        n_response_tokens = (labels[0] != -100).sum().item()
+        print(f"[overfit] {ex['label']}: ctx_ids {tuple(ctx_ids.shape)}  "
+              f"input_ids {tuple(full_ids.shape)}  "
+              f"n_response_tokens={n_response_tokens}", flush=True)
+
+        train_examples.append({
+            "label": ex["label"],
+            "ctx_ids": ctx_ids,
+            "ctx_attn_mask": ctx_attn_mask,
+            "n_ctx_chunks": n_ctx_chunks,
+            "input_ids": full_ids,
+            "attention_mask": attention_mask,
+            "labels": labels,
+        })
+
+    print(f"[overfit] prompt_end={prompt_end} (shared)", flush=True)
 
     section("Step 4: train")
     optimizer = torch.optim.AdamW(model.hypernet.parameters(), lr=args.lr)
@@ -230,37 +284,48 @@ def main() -> None:
 
     for step in range(args.steps):
         optimizer.zero_grad()
-        outputs, (gen_loras, _) = model(
-            ctx_ids=ctx_ids,
-            ctx_attn_mask=ctx_attn_mask,
-            n_ctx_chunks=n_ctx_chunks,
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            labels=labels,
-            return_generated_lora=True,
-        )
-        per_token_loss = causal_lm_ce_loss(outputs.logits, labels, vocab_size)
-        n_active = (labels != -100).sum().clamp(min=1)
-        ce_loss = per_token_loss.sum() / n_active
+        per_example_losses = []
+        # Accumulate gradients across both examples per step (equivalent to
+        # gradient accumulation with batch_size=1, accum_steps=len(examples)).
+        # Peak memory is one example at a time — the prior example's forward
+        # graph is freed when its backward() returns.
+        for ex in train_examples:
+            outputs, (gen_loras, _) = model(
+                ctx_ids=ex["ctx_ids"],
+                ctx_attn_mask=ex["ctx_attn_mask"],
+                n_ctx_chunks=ex["n_ctx_chunks"],
+                input_ids=ex["input_ids"],
+                attention_mask=ex["attention_mask"],
+                labels=ex["labels"],
+                return_generated_lora=True,
+            )
+            per_token_loss = causal_lm_ce_loss(outputs.logits, ex["labels"], vocab_size)
+            n_active = (ex["labels"] != -100).sum().clamp(min=1)
+            ce_loss = per_token_loss.sum() / n_active
 
-        if args.l1_reg > 0:
-            # Same L1 reg shape as trainer.py: A.abs().sum(0).mean() + B same,
-            # averaged over modules.
-            l1_norm = 0.0
-            for module_loras in gen_loras.values():
-                l1_norm += (module_loras["A"].abs().sum(0).mean()
-                            + module_loras["B"].abs().sum(0).mean())
-            l1 = l1_norm / len(gen_loras)
-            total_loss = ce_loss + args.l1_reg * l1
-        else:
-            l1 = torch.tensor(0.0, device=device)
-            total_loss = ce_loss
-        total_loss.backward()
+            if args.l1_reg > 0:
+                l1_norm = 0.0
+                for module_loras in gen_loras.values():
+                    l1_norm += (module_loras["A"].abs().sum(0).mean()
+                                + module_loras["B"].abs().sum(0).mean())
+                l1 = l1_norm / len(gen_loras)
+                loss = ce_loss + args.l1_reg * l1
+            else:
+                loss = ce_loss
+            # Average gradient contribution per example (so total grad scale
+            # doesn't depend on how many examples we have).
+            (loss / len(train_examples)).backward()
+            per_example_losses.append(ce_loss.item())
+
         optimizer.step()
 
         if step % args.log_every == 0 or step == args.steps - 1:
-            print(f"step {step:4d}  ce={ce_loss.item():.4f}  "
-                  f"l1={l1.item():.6f}  total={total_loss.item():.4f}",
+            losses_str = "  ".join(
+                f"{ex['label']}_ce={l:.4f}"
+                for ex, l in zip(train_examples, per_example_losses)
+            )
+            mean_loss = sum(per_example_losses) / len(per_example_losses)
+            print(f"step {step:4d}  {losses_str}  mean={mean_loss:.4f}",
                   flush=True)
 
     model.eval()
@@ -277,51 +342,58 @@ def main() -> None:
     if not getattr(model.ctx_encoder.base_model, "name_or_path", ""):
         model.ctx_encoder.base_model.name_or_path = MODEL
 
-    section("Test 1: trained context + trained prompt (should match RESPONSE)")
-    model.reset()
-    model.internalize(CONTEXT)
-    with torch.no_grad():
-        out1 = model.generate(
-            input_ids=test_prompt_ids,
-            max_new_tokens=args.max_new_tokens,
-            do_sample=False,
-        )
-    text1 = tokenizer.decode(out1[0, test_prompt_ids.shape[-1]:],
-                             skip_special_tokens=True)
-    print(text1.strip())
+    def gen_with_context(ctx_str):
+        model.reset()
+        model.internalize(ctx_str)
+        with torch.no_grad():
+            out = model.generate(
+                input_ids=test_prompt_ids,
+                max_new_tokens=args.max_new_tokens,
+                do_sample=False,
+            )
+        return tokenizer.decode(out[0, test_prompt_ids.shape[-1]:],
+                                skip_special_tokens=True).strip()
 
-    section("Test 2: ALT context + trained prompt (should differ from Test 1)")
-    model.reset()
-    model.internalize(CONTEXT_ALT)
-    with torch.no_grad():
-        out2 = model.generate(
-            input_ids=test_prompt_ids,
-            max_new_tokens=args.max_new_tokens,
-            do_sample=False,
-        )
-    text2 = tokenizer.decode(out2[0, test_prompt_ids.shape[-1]:],
-                             skip_special_tokens=True)
-    print(text2.strip())
+    test_outputs = {}
+    for ex in EXAMPLES:
+        section(f"Test: trained context [{ex['label']}]")
+        text = gen_with_context(ex["context"])
+        test_outputs[ex["label"]] = text
+        print(text)
 
-    section("Test 3: no LoRA (baseline)")
+    section("Test: ALT context (quicksort — neither trained response should appear)")
+    text_alt = gen_with_context(CONTEXT_ALT)
+    test_outputs["alt"] = text_alt
+    print(text_alt)
+
+    section("Test: no LoRA (baseline)")
     model.reset()
     with torch.no_grad():
-        out3 = model.base_model.generate(
+        out_base = model.base_model.generate(
             input_ids=test_prompt_ids,
             max_new_tokens=args.max_new_tokens,
             do_sample=False,
         )
-    text3 = tokenizer.decode(out3[0, test_prompt_ids.shape[-1]:],
-                             skip_special_tokens=True)
-    print(text3.strip())
+    text_base = tokenizer.decode(out_base[0, test_prompt_ids.shape[-1]:],
+                                 skip_special_tokens=True).strip()
+    print(text_base)
 
     section("Summary")
-    print(f"Target RESPONSE:\n  {RESPONSE!r}")
-    print(f"\nTest 1 (trained ctx): {text1.strip()!r}")
-    print(f"\nTest 2 (alt ctx):     {text2.strip()!r}")
-    print(f"\nIdentical (1 vs 2)?   {text1.strip() == text2.strip()}")
-    print(f"Test 1 contains 'O(n)': {'O(n)' in text1}")
-    print(f"Test 1 contains 'O(1)': {'O(1)' in text1}")
+    for ex in EXAMPLES:
+        print(f"  Target [{ex['label']}]:    {ex['response']!r}")
+        print(f"  Got    [{ex['label']}]:    {test_outputs[ex['label']]!r}\n")
+    print(f"  ALT context:               {test_outputs['alt']!r}")
+
+    # The key diagnostic question: does the modulated output DIFFER across
+    # contexts? A context-blind LoRA gives identical outputs everywhere.
+    labels_seen = list(test_outputs.keys())
+    iter_out = test_outputs.get("iterative", "")
+    rec_out = test_outputs.get("recursive", "")
+    print(f"\n  iterative == recursive ?    {iter_out == rec_out}")
+    print(f"  iterative contains 'O(n)'   {'O(n)' in iter_out}")
+    print(f"  iterative contains 'O(1)'   {'O(1)' in iter_out}")
+    print(f"  recursive contains 'O(2^n)' {'O(2^n)' in rec_out}")
+    print(f"  recursive contains 'stack'  {'stack' in rec_out.lower()}")
 
 
 if __name__ == "__main__":
