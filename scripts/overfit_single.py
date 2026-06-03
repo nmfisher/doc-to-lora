@@ -181,19 +181,26 @@ def main() -> None:
     ctx_enc = ctx_tokenizer(CONTEXT, return_tensors="pt").to(device)
     ctx_ids = ctx_enc["input_ids"]
 
-    # Full chat (user prompt + assistant response)
-    full_ids = tokenizer.apply_chat_template(
+    # Full chat (user prompt + assistant response). Gemma 4's tokenizer
+    # returns a BatchEncoding (dict) from apply_chat_template, so we use
+    # return_dict=True and pull ["input_ids"] — same pattern as the
+    # working test_gemma4_hypernet.py.
+    full_enc = tokenizer.apply_chat_template(
         [{"role": "user", "content": PROMPT}, {"role": "assistant", "content": RESPONSE}],
         return_tensors="pt",
         add_generation_prompt=False,
+        return_dict=True,
     ).to(device)
+    full_ids = full_enc["input_ids"]
 
     # Prompt-only (to find where the response starts, for label masking)
-    prompt_ids = tokenizer.apply_chat_template(
+    prompt_enc = tokenizer.apply_chat_template(
         [{"role": "user", "content": PROMPT}],
         return_tensors="pt",
         add_generation_prompt=True,
+        return_dict=True,
     ).to(device)
+    prompt_ids = prompt_enc["input_ids"]
     prompt_end = prompt_ids.shape[-1]
 
     input_ids = full_ids
@@ -238,11 +245,13 @@ def main() -> None:
     model.eval()
 
     # Build the inference-time prompt (user only, with generation prompt)
-    test_prompt_ids = tokenizer.apply_chat_template(
+    test_prompt_enc = tokenizer.apply_chat_template(
         [{"role": "user", "content": PROMPT}],
         return_tensors="pt",
         add_generation_prompt=True,
+        return_dict=True,
     ).to(device)
+    test_prompt_ids = test_prompt_enc["input_ids"]
 
     if not getattr(model.ctx_encoder.base_model, "name_or_path", ""):
         model.ctx_encoder.base_model.name_or_path = MODEL
