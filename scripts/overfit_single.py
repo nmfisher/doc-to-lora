@@ -39,6 +39,7 @@ from ctx_to_lora.modeling.hypernet import (
     ModulatedPretrainedModel,
     get_hypernet_config,
 )
+from ctx_to_lora.trainer import causal_lm_ce_loss
 
 MODEL = os.environ.get("MODEL_DIR", "google/gemma-4-E2B-it")
 TARGET_MODULES = ["q_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
@@ -222,6 +223,10 @@ def main() -> None:
 
     section("Step 4: train")
     optimizer = torch.optim.AdamW(model.hypernet.parameters(), lr=args.lr)
+    # The modulated wrapper hardcodes loss=None in its output; we compute
+    # CE externally with the same helper the production trainer uses
+    # (shift-by-one + cross_entropy, ignore_index=-100).
+    vocab_size = tokenizer.vocab_size
 
     for step in range(args.steps):
         optimizer.zero_grad()
@@ -234,11 +239,18 @@ def main() -> None:
             labels=labels,
             return_generated_lora=True,
         )
-        ce_loss = outputs.loss
+        per_token_loss = causal_lm_ce_loss(outputs.logits, labels, vocab_size)
+        n_active = (labels != -100).sum().clamp(min=1)
+        ce_loss = per_token_loss.sum() / n_active
+
         if args.l1_reg > 0:
-            l1 = torch.stack([
-                lora.abs().mean() for lora in gen_loras.values()
-            ]).mean()
+            # Same L1 reg shape as trainer.py: A.abs().sum(0).mean() + B same,
+            # averaged over modules.
+            l1_norm = 0.0
+            for module_loras in gen_loras.values():
+                l1_norm += (module_loras["A"].abs().sum(0).mean()
+                            + module_loras["B"].abs().sum(0).mean())
+            l1 = l1_norm / len(gen_loras)
             total_loss = ce_loss + args.l1_reg * l1
         else:
             l1 = torch.tensor(0.0, device=device)
