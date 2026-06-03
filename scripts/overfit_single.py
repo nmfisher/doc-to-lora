@@ -180,6 +180,9 @@ def main() -> None:
     # Context for the hypernet
     ctx_enc = ctx_tokenizer(CONTEXT, return_tensors="pt").to(device)
     ctx_ids = ctx_enc["input_ids"]
+    # Direct model.forward() requires the caller to pass ctx_attn_mask;
+    # only the internalize() / generate() paths build it implicitly.
+    ctx_attn_mask = torch.ones_like(ctx_ids)
 
     # Full chat (user prompt + assistant response). Gemma 4's tokenizer
     # returns a BatchEncoding (dict) from apply_chat_template, so we use
@@ -220,6 +223,7 @@ def main() -> None:
         optimizer.zero_grad()
         outputs, (gen_loras, _) = model(
             ctx_ids=ctx_ids,
+            ctx_attn_mask=ctx_attn_mask,
             input_ids=input_ids,
             attention_mask=attention_mask,
             labels=labels,
