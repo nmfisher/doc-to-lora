@@ -183,6 +183,10 @@ def main() -> None:
     # Direct model.forward() requires the caller to pass ctx_attn_mask;
     # only the internalize() / generate() paths build it implicitly.
     ctx_attn_mask = torch.ones_like(ctx_ids)
+    # n_ctx_chunks[i] = how many chunks context i was split into. Our
+    # single context fits in one chunk, so [1]. (split_too_long_ctx in
+    # processing.py produces this for the production pipeline.)
+    n_ctx_chunks = torch.ones(ctx_ids.shape[0], dtype=torch.int32, device=device)
 
     # Full chat (user prompt + assistant response). Gemma 4's tokenizer
     # returns a BatchEncoding (dict) from apply_chat_template, so we use
@@ -224,6 +228,7 @@ def main() -> None:
         outputs, (gen_loras, _) = model(
             ctx_ids=ctx_ids,
             ctx_attn_mask=ctx_attn_mask,
+            n_ctx_chunks=n_ctx_chunks,
             input_ids=input_ids,
             attention_mask=attention_mask,
             labels=labels,
