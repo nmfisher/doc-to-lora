@@ -8,7 +8,7 @@ uv pip install https://github.com/Dao-AILab/flash-attention/releases/download/v2
 uv pip install flashinfer-python==0.2.2 -i https://flashinfer.ai/whl/cu124/torch2.6
 
 # download squad dataset
-HF_HUB_ENABLE_HF_TRANSFER=1 uv run huggingface-cli download --repo-type dataset rajpurkar/squad --local-dir data/raw_datasets/squad
+HF_HUB_ENABLE_HF_TRANSFER=1 uv run hf download --repo-type dataset rajpurkar/squad --local-dir data/raw_datasets/squad
 uv run data/build_drop_compact.py
 uv run data/build_pwc_compact.py
 uv run data/build_ropes_compact.py
