@@ -50,6 +50,7 @@ from ctx_to_lora.modeling.hypernet import (
     ModulatedPretrainedModel,
     get_hypernet_config,
 )
+from ctx_to_lora.data.processing import tokenize_ctx_text
 from ctx_to_lora.trainer import causal_lm_ce_loss
 
 MODEL = os.environ.get("MODEL_DIR", "google/gemma-4-E2B-it")
@@ -159,7 +160,9 @@ def main() -> None:
         use_flash_attn=False,
         peft_config=peft_config,
     )
-    ctx_tokenizer = get_tokenizer(MODEL, train=True)
+    # Use the same tokenizer call internalize() uses (train=False default)
+    # so train-time and inference-time ctx_ids are byte-for-byte identical.
+    ctx_tokenizer = get_tokenizer(MODEL)
 
     ctx_cfg = AutoConfig.from_pretrained(MODEL, trust_remote_code=True)
     if hasattr(ctx_cfg, "text_config"):
@@ -232,8 +235,17 @@ def main() -> None:
 
     train_examples = []
     for ex in EXAMPLES:
-        ctx_enc = ctx_tokenizer(ex["context"], return_tensors="pt").to(device)
-        ctx_ids = ctx_enc["input_ids"]
+        # IMPORTANT: match what model.internalize() does at inference time.
+        # internalize() calls tokenize_ctx_text which WRAPS the context in
+        # a chat template ({system, user: <ctx>, add_generation_prompt}).
+        # If we tokenize the raw context string here, the hypernet trains
+        # on one token distribution and sees a different one at inference,
+        # so the LoRA it generates for the same context_str differs between
+        # the two paths.
+        ctx_ids_list = tokenize_ctx_text(
+            dict(context=[ex["context"]]), ctx_tokenizer
+        )["ctx_ids"]
+        ctx_ids = torch.tensor(ctx_ids_list, device=device)
         # Direct model.forward() requires the caller to pass ctx_attn_mask;
         # only the internalize() / generate() paths build it implicitly.
         ctx_attn_mask = torch.ones_like(ctx_ids)
