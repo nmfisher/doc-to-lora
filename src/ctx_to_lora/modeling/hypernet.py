@@ -864,6 +864,21 @@ class ModulatedPretrainedModel(nn.Module):
         # for timing
         return apply_lora_to_layers(*args, **kwargs)
 
+    # HF Trainer auto-calls these on the model it wraps when
+    # --gradient_checkpointing=True. Delegate to base_model since that's
+    # what carries the activation memory.
+    def gradient_checkpointing_enable(self, **kwargs):
+        self.base_model.gradient_checkpointing_enable(**kwargs)
+        if hasattr(self.base_model, "enable_input_require_grads"):
+            self.base_model.enable_input_require_grads()
+
+    def gradient_checkpointing_disable(self):
+        self.base_model.gradient_checkpointing_disable()
+
+    def enable_input_require_grads(self):
+        if hasattr(self.base_model, "enable_input_require_grads"):
+            self.base_model.enable_input_require_grads()
+
     # for simple api usage
     def internalize(self, ctx_str: str):
         ctx_tokenizer = get_tokenizer(self.ctx_encoder.base_model.name_or_path)

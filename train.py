@@ -252,17 +252,11 @@ def main():
         if len([p for p in model.base_model.parameters() if p.requires_grad]):
             raise ValueError("base model contains trainable parameters")
 
-        # HF Trainer's gradient_checkpointing flag doesn't reach our base
-        # model because Trainer wraps ModulatedPretrainedModel, not base.
-        # Wire it through manually so --gradient_checkpointing=True cuts
-        # activation memory on the base forward (the dominant cost — we
-        # backprop loss -> LoRA -> hypernet, which needs base activations
-        # cached). ~30% slower per step, but fits on 24-48 GB GPUs.
-        if getattr(training_args, "gradient_checkpointing", False):
-            model.base_model.gradient_checkpointing_enable()
-            if hasattr(model.base_model, "enable_input_require_grads"):
-                model.base_model.enable_input_require_grads()
-            logger.info("Enabled gradient checkpointing on base_model")
+        # HF Trainer auto-enables grad checkpointing when
+        # --gradient_checkpointing=True by calling
+        # model.gradient_checkpointing_enable(). ModulatedPretrainedModel
+        # now exposes that as a delegation to base_model (see hypernet.py),
+        # so this Just Works without explicit handling here.
 
         model.hypernet.compile(fullgraph=True, mode="max-autotune")
 
