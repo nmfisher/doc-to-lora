@@ -258,13 +258,7 @@ def main():
         # now exposes that as a delegation to base_model (see hypernet.py),
         # so this Just Works without explicit handling here.
 
-        # NOTE: torch.compile of the hypernet is disabled. transformers
-        # `utils/generic.py:wrapper` does `arg_name in func.__code__.co_varnames`
-        # which torch 2.6 dynamo can't trace. fullgraph=False, suppress_errors
-        # = True, and nn.Module.compile() all still propagate Unsupported
-        # because nn.Module.compile's path doesn't honor the suppression.
-        # Eager runs ~10-20% slower but actually works. Re-enable when
-        # transformers drops the co_varnames-based signature check (HF #...).
+        model.hypernet.compile(fullgraph=True, mode="max-autotune")
 
     else:
         # activate LoRA
@@ -274,7 +268,7 @@ def main():
         base_model_config.save_pretrained(output_dir)
         logger.info("Using LoRA")
         model.set_adapter("default")
-        # See HyperLoRA branch above — torch.compile disabled for the same reason.
+        model = torch.compile(model)
 
     model.train()
     logger.debug(model)
