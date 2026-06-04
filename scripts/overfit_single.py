@@ -147,10 +147,17 @@ def main() -> None:
                    help="Comma-separated module names to target with the hypernet "
                    "LoRAs. Default is all 5 Gemma 4 attn+mlp projections; pass "
                    "e.g. 'down_proj' to mirror the production training restriction.")
+    p.add_argument("--ctx-encoder-last-layer", type=int, default=16,
+                   help="Number of ctx_encoder hidden states the hypernet consumes. "
+                   "MUST match len(layer_indices) produced by the target_modules "
+                   "majority-group selection — 16 for all 5 modules, 20 for "
+                   "down_proj only. Mismatch → CUDA scatter index out of bounds.")
     args = p.parse_args()
 
     target_modules = [m.strip() for m in args.target_modules.split(",") if m.strip()]
     print(f"[overfit] target_modules={target_modules}", flush=True)
+    print(f"[overfit] ctx_encoder_last_layer={args.ctx_encoder_last_layer}",
+          flush=True)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"[overfit] device={device}", flush=True)
@@ -179,7 +186,7 @@ def main() -> None:
         ctx_encoder_model_name_or_path=MODEL,
         ctx_encoder_type=CTX_ENCODER_TYPE.PER_LAYER_ACTIVATIONS,
         layer_idx=8,
-        ctx_encoder_last_layer=16,
+        ctx_encoder_last_layer=args.ctx_encoder_last_layer,
     )
     hypernet_args = HypernetArguments(per_rank_gen=True, per_layer_processing=True)
     aggregator_args = AggregatorArguments(
