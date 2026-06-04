@@ -258,7 +258,12 @@ def main():
         # now exposes that as a delegation to base_model (see hypernet.py),
         # so this Just Works without explicit handling here.
 
-        model.hypernet.compile(fullgraph=True, mode="max-autotune")
+        # fullgraph=True aborts on any dynamo-unsupported op. Gemma 4's
+        # forward introspects `'use_cache' in foo.co_varnames`, which
+        # torch 2.6 dynamo can't trace — under fullgraph this kills the
+        # whole compile. Drop it so dynamo graph-breaks on the unsupported
+        # fragment and still compiles the rest.
+        model.hypernet.compile(mode="max-autotune")
 
     else:
         # activate LoRA
