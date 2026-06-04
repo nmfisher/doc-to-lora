@@ -419,7 +419,10 @@ def main():
         # blind LoRAs immediately — see callbacks.py for the failure
         # mode it exists to catch.
         from ctx_to_lora.callbacks import CtxSensitivityProbe
-        callbacks.append(CtxSensitivityProbe(tokenizer))
+        callbacks.append(CtxSensitivityProbe(
+            tokenizer=tokenizer,
+            model_name_or_path=model_args.model_name_or_path,
+        ))
 
     train_model(
         model,

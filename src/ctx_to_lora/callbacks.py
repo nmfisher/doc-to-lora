@@ -85,8 +85,10 @@ class CtxSensitivityProbe(TrainerCallback):
             seconds on a long generation.
     """
 
-    def __init__(self, tokenizer, max_new_tokens: int = 48):
+    def __init__(self, tokenizer, model_name_or_path: str,
+                 max_new_tokens: int = 48):
         self.tokenizer = tokenizer
+        self.model_name_or_path = model_name_or_path
         self.max_new_tokens = max_new_tokens
 
     def on_save(self, args, state, control, **kwargs):
@@ -94,6 +96,15 @@ class CtxSensitivityProbe(TrainerCallback):
         if model is None:
             _emit("[ctx-probe] skipped: no model in callback kwargs")
             return
+
+        # internalize() loads a tokenizer via ctx_encoder.base_model.name_or_path.
+        # train.py doesn't set name_or_path explicitly, and the wrapped HF model
+        # often has it empty by the time we're here — without this, internalize()
+        # raises OSError("Repo id... '': ..."). Match overfit_single.py:354.
+        ctx_base = getattr(model, "ctx_encoder", None)
+        if ctx_base is not None and not getattr(ctx_base.base_model,
+                                                "name_or_path", ""):
+            ctx_base.base_model.name_or_path = self.model_name_or_path
 
         # The Trainer keeps trainable params in train() mode; flip to eval()
         # for deterministic generation, restore at the end. Use no_grad to
@@ -106,6 +117,26 @@ class CtxSensitivityProbe(TrainerCallback):
             _emit(f"[ctx-probe] step={state.global_step} FAILED: "
                   f"{type(e).__name__}: {e}")
         finally:
+            # Restore everything the probe could have disturbed:
+            # 1. The LoRA-patched forwards. _probe calls model.reset() per
+            #    context, which sets `module.forward = module.forward_orig`
+            #    (hypernet.py:911). If internalize() then fails before
+            #    patch_lora_forward() runs, the down_proj layers stay
+            #    UNPATCHED — and the next training step's wrapper passes
+            #    n_qs to plain Linear.forward, crashing with
+            #    `TypeError: Linear.forward() got an unexpected keyword
+            #    argument 'n_qs'`. Re-patch unconditionally.
+            if hasattr(model, "patch_lora_forward"):
+                try:
+                    model.patch_lora_forward()
+                except Exception as e:
+                    _emit(f"[ctx-probe] step={state.global_step} "
+                          f"REPATCH FAILED: {type(e).__name__}: {e}")
+            # 2. Drop any LoRA the probe generated so the next train step
+            #    starts from a clean state. (No-op if probe already reset.)
+            if hasattr(model, "generated_loras"):
+                model.generated_loras = None
+            # 3. Restore train mode if we toggled.
             if was_training:
                 model.train()
 
