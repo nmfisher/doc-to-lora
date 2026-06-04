@@ -119,8 +119,16 @@ def main():
     # still possible to have a name crash though
     # logging_dir is just "runs/DATE_TIME_HOSTNAME"
     slurm_job_id = f"_{os.getenv('SLURM_JOB_ID')}" if os.getenv("SLURM_JOB_ID") else ""
+    # `.strip("runs/")` looks like a prefix-strip but str.strip removes any
+    # characters in the set, not the literal substring. With a logging_dir
+    # like "train_outputs/runs/smoke_124555" it strips nothing from the
+    # ends, so the whole path leaks into the seed, and the f-string below
+    # prepends "train_outputs/runs/" again — output_dir comes out as
+    # train_outputs/runs/train_outputs/runs/smoke_124555_<hash>/. Use the
+    # basename instead: same seed intent, no path doubling.
+    logging_basename = os.path.basename(training_args.logging_dir.rstrip("/"))
     run_name = (
-        get_run_name(seed_str=training_args.logging_dir.strip("runs/") + slurm_job_id)
+        get_run_name(seed_str=logging_basename + slurm_job_id)
         if not checkpoint_dir
         else checkpoint_dir.strip("/").split("/")[-2]
     )
