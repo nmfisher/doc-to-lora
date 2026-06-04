@@ -412,6 +412,15 @@ def main():
     else:
         wandb.init(mode="disabled")
 
+    callbacks = []
+    if isinstance(model, ModulatedPretrainedModel):
+        # Fires on every checkpoint save; logs 3 generations (iter fib /
+        # recur fib / quicksort) on the same prompt. Surfaces context-
+        # blind LoRAs immediately — see callbacks.py for the failure
+        # mode it exists to catch.
+        from ctx_to_lora.callbacks import CtxSensitivityProbe
+        callbacks.append(CtxSensitivityProbe(tokenizer))
+
     train_model(
         model,
         training_args,
@@ -424,6 +433,7 @@ def main():
                 [compute_per_token_acc, compute_prefix_matching, compute_perplexity]
             ),
         ),
+        callbacks=callbacks,
     )
     logger.info(f"Training run finished and saved to {output_dir}")
 

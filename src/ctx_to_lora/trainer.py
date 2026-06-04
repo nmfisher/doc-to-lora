@@ -404,6 +404,7 @@ def train_model(
     val_dataset=None,
     train_collator=None,
     compute_metrics=None,
+    callbacks=None,
 ):
     checkpoint = None
     if training_args.resume_from_checkpoint is not None:
@@ -447,6 +448,9 @@ def train_model(
 
     # MONKEY PATCH: remove embedding layers from weight decay
     trainer.get_decay_parameter_names = get_decay_parameter_names
+
+    for cb in callbacks or []:
+        trainer.add_callback(cb)
 
     # Trainer loads the best model after training
     # is done when load_best_model_at_end=True
