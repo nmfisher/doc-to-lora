@@ -3,7 +3,11 @@ uv self update
 uv venv --python 3.10 --seed
 uv pip install torch==2.6.0 torchvision==0.21.0 torchaudio==2.6.0 --torch-backend=cu124
 uv sync
-uv pip install tokenizers==0.21.0
+# Don't force tokenizers==0.21.0 here. That pin was for the old
+# transformers 4.51.x days; it now drags huggingface-hub back to
+# 0.36.x, which loses `is_offline_mode` and breaks transformers
+# 5.5.0+ at import time. uv.lock pins tokenizers==0.22.2 which is
+# the version transformers 5.5.0 actually expects.
 uv pip install https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.6cxx11abiFALSE-cp310-cp310-linux_x86_64.whl
 uv pip install flashinfer-python==0.2.2 -i https://flashinfer.ai/whl/cu124/torch2.6
 
