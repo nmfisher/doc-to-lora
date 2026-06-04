@@ -13,6 +13,14 @@ import wandb
 # only flip on for one-shot debug runs.
 if os.environ.get("TORCH_ANOMALY_DETECT") == "1":
     torch.autograd.set_detect_anomaly(True)
+
+# torch 2.6 dynamo can't trace `'use_cache' in foo.co_varnames` in
+# Gemma 4's forward path. With suppress_errors=True dynamo gracefully
+# falls back to eager for the untraceable fragment instead of killing
+# the run before step 0. The rest of the graph still benefits from
+# compile. PyTorch's own Unsupported exception explicitly recommends
+# this setting as the fall-back mechanism.
+torch._dynamo.config.suppress_errors = True
 from datasets import disable_caching
 from peft import PeftModel
 from transformers import (
