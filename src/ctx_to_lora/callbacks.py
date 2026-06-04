@@ -106,28 +106,34 @@ class CtxSensitivityProbe(TrainerCallback):
                                                 "name_or_path", ""):
             ctx_base.base_model.name_or_path = self.model_name_or_path
 
-        # The Trainer keeps trainable params in train() mode; flip to eval()
-        # for deterministic generation, restore at the end. Use no_grad to
-        # avoid building the autograd graph for the probe forward.
+        # Training patches each LoRA-targeted forward with lora_forward_packed,
+        # which expects seq_lens/tot_len from the data collator. The probe's
+        # model.generate() doesn't supply those, so the packed forward crashes
+        # with `TypeError: lora_forward_packed() missing 2 required positional
+        # arguments`. Flip the flag, force a re-patch with the unpacked
+        # lora_forward for the probe, restore for training in finally.
         was_training = model.training
+        original_packing = getattr(model, "use_sequence_packing", True)
         model.eval()
         try:
+            if hasattr(model, "patch_lora_forward"):
+                model.use_sequence_packing = False
+                model.reset()  # clear patched_forward flags
+                model.patch_lora_forward()  # re-patch with non-packed forward
             self._probe(model, state.global_step)
         except Exception as e:
             _emit(f"[ctx-probe] step={state.global_step} FAILED: "
                   f"{type(e).__name__}: {e}")
         finally:
             # Restore everything the probe could have disturbed:
-            # 1. The LoRA-patched forwards. _probe calls model.reset() per
-            #    context, which sets `module.forward = module.forward_orig`
-            #    (hypernet.py:911). If internalize() then fails before
-            #    patch_lora_forward() runs, the down_proj layers stay
-            #    UNPATCHED — and the next training step's wrapper passes
-            #    n_qs to plain Linear.forward, crashing with
-            #    `TypeError: Linear.forward() got an unexpected keyword
-            #    argument 'n_qs'`. Re-patch unconditionally.
+            # 1. Sequence packing mode + re-patch with the packed forward.
+            #    Without this the next training step's wrapper passes n_qs to
+            #    plain Linear.forward (TypeError: 'n_qs' unexpected), or hits
+            #    the wrong forward variant.
             if hasattr(model, "patch_lora_forward"):
+                model.use_sequence_packing = original_packing
                 try:
+                    model.reset()
                     model.patch_lora_forward()
                 except Exception as e:
                     _emit(f"[ctx-probe] step={state.global_step} "
