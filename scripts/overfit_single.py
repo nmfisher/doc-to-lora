@@ -143,7 +143,14 @@ def main() -> None:
     p.add_argument("--grad-checkpoint", action="store_true",
                    help="Enable gradient checkpointing on base model — cuts "
                    "activation memory ~50% at ~30% slower. Use on <40GB GPUs.")
+    p.add_argument("--target-modules", type=str, default=",".join(TARGET_MODULES),
+                   help="Comma-separated module names to target with the hypernet "
+                   "LoRAs. Default is all 5 Gemma 4 attn+mlp projections; pass "
+                   "e.g. 'down_proj' to mirror the production training restriction.")
     args = p.parse_args()
+
+    target_modules = [m.strip() for m in args.target_modules.split(",") if m.strip()]
+    print(f"[overfit] target_modules={target_modules}", flush=True)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"[overfit] device={device}", flush=True)
@@ -151,7 +158,7 @@ def main() -> None:
     section("Step 1: build fresh modulated model")
     peft_config = get_lora_config(
         MODEL, lora_r=8, lora_dropout=0.0,
-        target_modules=TARGET_MODULES, lora_alpha=8,
+        target_modules=target_modules, lora_alpha=8,
     )
     base_model, tokenizer = get_model_and_tokenizer(
         model_name_or_path=MODEL,
