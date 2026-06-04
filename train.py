@@ -13,14 +13,6 @@ import wandb
 # only flip on for one-shot debug runs.
 if os.environ.get("TORCH_ANOMALY_DETECT") == "1":
     torch.autograd.set_detect_anomaly(True)
-
-# torch 2.6 dynamo can't trace `'use_cache' in foo.co_varnames` in
-# Gemma 4's forward path. With suppress_errors=True dynamo gracefully
-# falls back to eager for the untraceable fragment instead of killing
-# the run before step 0. The rest of the graph still benefits from
-# compile. PyTorch's own Unsupported exception explicitly recommends
-# this setting as the fall-back mechanism.
-torch._dynamo.config.suppress_errors = True
 from datasets import disable_caching
 from peft import PeftModel
 from transformers import (
@@ -266,12 +258,13 @@ def main():
         # now exposes that as a delegation to base_model (see hypernet.py),
         # so this Just Works without explicit handling here.
 
-        # fullgraph=True aborts on any dynamo-unsupported op. Gemma 4's
-        # forward introspects `'use_cache' in foo.co_varnames`, which
-        # torch 2.6 dynamo can't trace — under fullgraph this kills the
-        # whole compile. Drop it so dynamo graph-breaks on the unsupported
-        # fragment and still compiles the rest.
-        model.hypernet.compile(mode="max-autotune")
+        # NOTE: torch.compile of the hypernet is disabled. transformers
+        # `utils/generic.py:wrapper` does `arg_name in func.__code__.co_varnames`
+        # which torch 2.6 dynamo can't trace. fullgraph=False, suppress_errors
+        # = True, and nn.Module.compile() all still propagate Unsupported
+        # because nn.Module.compile's path doesn't honor the suppression.
+        # Eager runs ~10-20% slower but actually works. Re-enable when
+        # transformers drops the co_varnames-based signature check (HF #...).
 
     else:
         # activate LoRA
@@ -281,7 +274,7 @@ def main():
         base_model_config.save_pretrained(output_dir)
         logger.info("Using LoRA")
         model.set_adapter("default")
-        model = torch.compile(model)
+        # See HyperLoRA branch above — torch.compile disabled for the same reason.
 
     model.train()
     logger.debug(model)
