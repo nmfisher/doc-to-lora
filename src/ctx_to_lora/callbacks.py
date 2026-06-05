@@ -160,6 +160,15 @@ class CtxSensitivityProbe(TrainerCallback):
         prompt_len = prompt_ids.shape[-1]
 
         outputs = {}
+        # Capture the per-context LoRA tensors so we can quantify HOW different
+        # they are, not just whether the greedy decoder picked different tokens.
+        # If text outputs collapse to a single string, the question is whether
+        # the LoRAs themselves collapsed (architectural context-blindness — the
+        # hypernet maps very different ctx_ids to nearly identical LoRA tensors)
+        # or whether the LoRAs differ but the base model's prior over the prompt
+        # is strong enough that argmax still picks the same tokens (downstream
+        # failure, different fix).
+        captured_loras: dict[str, dict[str, dict[str, torch.Tensor]]] = {}
         for label, ctx_text in CONTEXTS.items():
             # reset() clears any cached LoRA so the new internalize() builds
             # a fresh one — without it the second context would inherit the
@@ -167,6 +176,17 @@ class CtxSensitivityProbe(TrainerCallback):
             # "context-sensitive" via stale state.
             model.reset()
             model.internalize(ctx_text)
+            # Snapshot the LoRA tensors right after internalize, before
+            # combine_lora / apply_lora_to_layers can rewrite them in-place.
+            gen = getattr(model, "generated_loras", None)
+            if gen is not None:
+                captured_loras[label] = {
+                    mname: {
+                        "A": gen[mname]["A"].detach().float().cpu().clone(),
+                        "B": gen[mname]["B"].detach().float().cpu().clone(),
+                    }
+                    for mname in gen
+                }
             out = model.generate(
                 input_ids=prompt_ids,
                 max_new_tokens=self.max_new_tokens,
@@ -188,3 +208,42 @@ class CtxSensitivityProbe(TrainerCallback):
         _emit(header)
         for label, text in outputs.items():
             _emit(f"[ctx-probe] step={step} {label}: {text!r}")
+
+        # Per-module LoRA tensor summary. For each (module, A|B), we log:
+        #   - Frobenius norm per context (should be similar across contexts;
+        #     wildly different norms would itself be a bug)
+        #   - pairwise L2 distance between contexts
+        #   - the diff/norm ratio (a normalized "how different" score:
+        #     ~0 = collapsed / context-blind, ~0.5+ = meaningfully distinct)
+        if captured_loras:
+            labels = list(captured_loras.keys())
+            module_names = list(captured_loras[labels[0]].keys())
+            pairs = [
+                (labels[i], labels[j])
+                for i in range(len(labels))
+                for j in range(i + 1, len(labels))
+            ]
+            for mname in module_names:
+                for tname in ("A", "B"):
+                    norms = {
+                        label: captured_loras[label][mname][tname]
+                            .flatten().norm().item()
+                        for label in labels
+                    }
+                    diffs = {
+                        f"{a}_vs_{b}": (
+                            captured_loras[a][mname][tname]
+                            - captured_loras[b][mname][tname]
+                        ).flatten().norm().item()
+                        for a, b in pairs
+                    }
+                    avg_norm = sum(norms.values()) / len(norms)
+                    avg_diff = sum(diffs.values()) / len(diffs)
+                    ratio = avg_diff / avg_norm if avg_norm > 0 else 0.0
+                    norms_str = " ".join(f"{l}={v:.3f}" for l, v in norms.items())
+                    diffs_str = " ".join(f"{k}={v:.3f}" for k, v in diffs.items())
+                    _emit(
+                        f"[ctx-probe] step={step} {mname}.{tname} "
+                        f"norms: {norms_str} | pairwise: {diffs_str} | "
+                        f"diff/norm={ratio:.4f}"
+                    )
