@@ -41,7 +41,7 @@ from ctx_to_lora.configs import (
     CtxEncoderArguments,
     HypernetArguments,
 )
-from ctx_to_lora.data.definitions import CTX_ENCODER_TYPE
+from ctx_to_lora.modeling.ctx_encoder import CTX_ENCODER_TYPE
 from ctx_to_lora.model_loading import (
     get_lora_config,
     get_model_and_tokenizer,
