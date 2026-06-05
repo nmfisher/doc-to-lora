@@ -1,0 +1,56 @@
+# Data-scale isolation experiment: same Gemma 4 E2B architecture as
+# gemma4_e2b_closed_qa.yaml, but training on SakanaAI's compact-4 datasets
+# (DROP / PWC / ROPES / SQuAD compact) instead of cocoon_code_qa.
+#
+# Rationale: cocoon_code_qa run plateaued at LoRA diff/norm ratio 0.145
+# (steps 2000-2500). SakanaAI's published recipe got context-sensitivity
+# on the same architecture, same target_modules, on ~52k compact-4
+# contexts (vs our 1k cocoon contexts). Hypothesis: data scale is the
+# bottleneck, not architecture. This config tests it by running the
+# same model + hypers on their data.
+#
+# Differences from gemma4_e2b_closed_qa.yaml:
+#   - target_modules: down_proj only (matches scripts/main_exp/1-train.sh)
+#   - ctx_encoder_last_layer: 20 (majority dim group for down_proj-only on
+#     Gemma 4; same value our prior runs used via --extra)
+#   - train_ds_names: 4 compact datasets, NOT cocoon_code_qa
+#   - use_kl_loss: false (we don't have self-gen logprob targets; would
+#     need a separate self_generate_qa.py pass with a Gemma 4 teacher to
+#     match SakanaAI's full distillation pipeline. Plain CE for now.)
+
+# LoRA — matches scripts/main_exp/1-train.sh exactly.
+lora_r: 8
+lora_dropout: 0.0
+target_modules:
+  - down_proj
+
+use_kl_loss: false
+
+ctx_encoder_type: per_layer_activations
+# down_proj-only majority group on Gemma 4 E2B has 20 layers; the encoder
+# truncates to layers[:19] = 19 layers + embed = 20 hidden states, so the
+# perceiver's num_layers (= len(layer_indices) = 20) matches.
+ctx_encoder_last_layer: 20
+
+# Per-segment latent count. With per_layer_activations + position_ids,
+# effective latents = n_latent_queries * num_layers = 16 * 20 = 320.
+n_latent_queries: 16
+num_blocks: 9
+num_self_attn_per_block: 0
+
+# Match scripts/main_exp/1-train.sh: grad_accum=8, max_packed lengths 4096.
+gradient_accumulation_steps: 8
+max_packed_inp_len: 4096
+max_packed_ctx_len: 4096
+
+# DATA: the four compact datasets SakanaAI used. Pre-registered in
+# src/ctx_to_lora/data/definitions.py:DS_KWARGS — install.sh builds the
+# parquets when BUILD_COMPACT_DATASETS=1 (the orchestrator sets this for
+# this experiment). Combined size: ~52k unique contexts.
+train_ds_names:
+  - drop_compact
+  - pwc_compact
+  - ropes_compact
+  - squad_compact
+
+val_ds_names: []
